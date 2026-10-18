@@ -121,6 +121,27 @@ and API key somewhere else.
 Run `jev-cc config` to see the settings in effect and where each one comes from.
 `TYPESAFE_API_KEY` overrides the key saved by `jev-cc login`.
 
+### Running locally
+
+[Laya](https://github.com/NandhaKishorM/laya) runs Jev-style models on your own machine and
+serves the same API. Start its server, then point `base_url` at it in your global config:
+
+```sh
+pip install "laya[serve]"
+LAYA_HOST=127.0.0.1 laya-serve
+```
+
+```toml
+# ~/.config/jev-cc/config.toml
+base_url = "http://127.0.0.1:8000"
+```
+
+No API key is needed unless you set `LAYA_API_KEY`, in which case save it with
+`jev-cc login`. On a slow machine, raise `timeout_ms` and `deadline_ms`.
+
+Laya's published checkpoints classify commits much less accurately than Jev, and are often
+confidently wrong. Run `jev-cc eval` in your repository before relying on one.
+
 ## Classification
 
 1. **Skip** merges, squashes, amends, `fixup!`/`squash!` commits, and messages that already
@@ -155,7 +176,8 @@ tests or CI config aren't sent anywhere.
 
 Any secrets in your staged changes are sent along with the patch. Keep sensitive paths out
 with `exclude`, catch secrets elsewhere with a secret scanner in a `pre-commit` hook, and
-don't install jev-cc in repositories whose code can't leave your machine.
+don't install jev-cc in repositories whose code can't leave your machine, unless you
+[run it locally](#running-locally).
 
 ## Development
 

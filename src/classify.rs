@@ -91,11 +91,16 @@ pub fn classify(
             choice,
             confidence,
             probabilities,
+            x_jev_confidence,
         }) => {
             if !settings.types.iter().any(|t| t.name == choice) {
                 return Err(format!("unexpected type from Jev: {choice}"));
             }
-            (choice, confidence, probabilities)
+            (
+                choice,
+                x_jev_confidence.unwrap_or(confidence),
+                probabilities,
+            )
         }
         _ => return Err("response had no type answer".into()),
     };
