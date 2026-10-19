@@ -126,8 +126,8 @@ and API key somewhere else. Nor can `classifier`.
 
 `norn install` also fits the built-in model to the repository's history, if it has at least
 20 commits with conventional prefixes, so it learns how the project labels its changes,
-including its own `types`. Run `norn learn` to update it. The built-in model never marks a
-change breaking.
+including its own `types` and scopes. Run `norn learn` to update it. The built-in model
+never marks a change breaking.
 
 Run `norn config` to see the settings in effect and where each one comes from.
 `TYPESAFE_API_KEY` overrides the key saved by `norn jev login`.
@@ -169,10 +169,12 @@ and are often confidently wrong. Run `norn eval` in your repository before relyi
    - `breaking`: yes or no
 4. **Scope.** With `scopes` configured, each changed file takes the scope of its longest
    matching path, so `packages/web/admin/users.ts` gets `(admin)` in the example above.
-   Without `scopes`, it's the directory every changed file shares, skipping container
-   directories such as `src/` and `packages/`, so changes only in `src/config/` get
-   `(config)`. If the files disagree, there's no scope. Lockfiles are ignored, because they
-   change along with whatever they belong to.
+   Otherwise, once norn has learned from the repository's history, it uses the scope that
+   history files those paths under, or none if the project doesn't use scopes. Before that,
+   it's the directory every changed file shares, skipping container directories such as
+   `src/` and `packages/`, so changes only in `src/config/` get `(config)`. If the files
+   disagree, there's no scope. Lockfiles are ignored, because they change along with
+   whatever they belong to.
 
 ## Privacy
 

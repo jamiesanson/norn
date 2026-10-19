@@ -370,15 +370,14 @@ fn summary(commits: &[Labelled], results: &[Result<Classification, String>]) -> 
     line(format!(
         "breaking    {expected_breaking} expected, {predicted_breaking} marked, {both} both"
     ));
-    let with_scope: Vec<_> = answered.iter().filter(|a| a.0.scope.is_some()).collect();
     line(format!(
-        "scope       {} of labelled scopes matched",
+        "scope       {} exactly right, counting no scope",
         pct(
-            with_scope
+            answered
                 .iter()
                 .filter(|a| a.0.scope == a.1.scope.as_deref())
                 .count(),
-            with_scope.len()
+            answered.len()
         )
     ));
 

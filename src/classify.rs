@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use crate::config::{Classifier, ScopeRule, TypeDef};
 use crate::diff::{self, ChangedFile, Changes, Outgoing};
 use crate::jev::{self, Answer, NoulCriteria, Question};
-use crate::{features, learn};
+use crate::{features, learn, model};
 
 const TYPE_INSTRUCTIONS: &str =
     "Which Conventional Commits type best describes the primary purpose of this staged change?";
@@ -69,7 +69,7 @@ pub fn classify(
     message: &str,
     settings: &Settings,
 ) -> Result<Classification, String> {
-    let scope = scope_for(files, settings.scopes);
+    let scope = choose_scope(files, settings.scopes, learn::learned_scopes());
 
     if let Some(kind) = local_type(files, settings.types) {
         return Ok(Classification {
@@ -326,6 +326,19 @@ fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// Configured `scopes` win, then the scope model `norn learn` made from this repository's
+/// history, then the directory the files share.
+fn choose_scope(
+    files: &[ChangedFile],
+    rules: &[ScopeRule],
+    learned: Option<&model::Model>,
+) -> Option<String> {
+    match learned {
+        Some(model) if rules.is_empty() => learn::predict_scope(model, files),
+        _ => scope_for(files, rules),
+    }
+}
+
 /// The scope every changed file agrees on, ignoring lockfiles, which follow changes
 /// elsewhere. With configured `scopes`, each file's longest matching path prefix decides;
 /// otherwise it's the directory the files share. Disagreement means no scope.
@@ -403,6 +416,28 @@ mod tests {
             .collect();
         rules.sort_by_key(|r| std::cmp::Reverse(r.prefix.len()));
         rules
+    }
+
+    #[test]
+    fn learned_scopes_beat_the_shared_directory_but_not_configured_ones() {
+        let docs: Vec<_> = (0..20)
+            .map(|_| {
+                let tokens = features::scope_tokens(&files(&["packages/web/app.ts"]));
+                (tokens, Some("frontend".to_string()))
+            })
+            .collect();
+        let learned = learn::scope_model(&docs);
+        let changed = files(&["packages/web/index.ts"]);
+        assert_eq!(
+            choose_scope(&changed, &[], Some(&learned)).as_deref(),
+            Some("frontend")
+        );
+        assert_eq!(choose_scope(&changed, &[], None).as_deref(), Some("web"));
+        let r = rules(&[("packages/web", "site")]);
+        assert_eq!(
+            choose_scope(&changed, &r, Some(&learned)).as_deref(),
+            Some("site")
+        );
     }
 
     #[test]

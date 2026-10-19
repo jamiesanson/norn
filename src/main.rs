@@ -341,6 +341,28 @@ fn print_learned(learned: &learn::Learned) {
         types.join(", "),
         learned.path.display()
     );
+    let scoped: usize = learned.scopes.iter().map(|(_, n)| n).sum();
+    if learned.scopes.is_empty() {
+        println!("this repository doesn't use scopes, so norn won't add one");
+    } else {
+        let top: Vec<&str> = learned
+            .scopes
+            .iter()
+            .take(6)
+            .map(|(s, _)| s.as_str())
+            .collect();
+        let more = learned.scopes.len().saturating_sub(top.len());
+        let more = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+        println!(
+            "scopes: {}{more}, on {}% of commits",
+            top.join(", "),
+            100 * scoped / learned.scope_commits.max(1)
+        );
+    }
 }
 
 fn run_export(args: &[&str]) -> Result<(), String> {
@@ -465,12 +487,15 @@ fn show_config() -> Result<(), String> {
         config.types.source
     );
     if config.scopes.is_empty() {
-        println!(
-            "{:<20}{:<30}  {}",
-            "scopes",
-            "(shared directory)",
-            config::Source::Default
-        );
+        let learned = learn::model_path()
+            .map(|p| p.with_file_name("scopes.bin"))
+            .is_some_and(|p| p.is_file());
+        if learned {
+            println!("{:<20}{:<30}  norn learn", "scopes", "(learned)");
+        } else {
+            let source = config::Source::Default;
+            println!("{:<20}{:<30}  {source}", "scopes", "(shared directory)");
+        }
     }
     for (i, rule) in config.scopes.iter().enumerate() {
         let key = if i == 0 { "scopes" } else { "" };

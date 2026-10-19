@@ -12,6 +12,9 @@ pub struct Tokens {
     pub paths: Vec<String>,
     pub patch: Vec<String>,
     pub meta: Vec<String>,
+    /// For the scope model; see `scope_tokens`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<String>,
 }
 
 impl Tokens {
@@ -21,6 +24,7 @@ impl Tokens {
             "paths" => &self.paths,
             "patch" => &self.patch,
             "meta" => &self.meta,
+            "scope" => &self.scope,
             _ => &[],
         }
     }
@@ -114,6 +118,33 @@ pub fn tokens(files: &[ChangedFile], patch: &str, message: &str) -> Tokens {
         format!("shape:{shape}"),
     ]);
     t
+}
+
+/// What the scope model reads: every directory prefix of each changed file, the path itself,
+/// and the file's stem (`Suspense.ts` and `Suspense.spec.ts` give `suspense`). Lockfiles
+/// are left out, because they change along with whatever they belong to.
+pub fn scope_tokens(files: &[ChangedFile]) -> Vec<String> {
+    let mut out = Vec::new();
+    for file in files.iter().filter(|f| !diff::is_lockfile(&f.path)) {
+        let mut prefix = String::new();
+        for (i, part) in file.path.split('/').enumerate() {
+            if i > 0 {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            out.push(format!("p:{prefix}"));
+        }
+        out.push(format!("s:{}", stem(&file.path)));
+    }
+    out
+}
+
+/// A file's name, lowercased, without its extensions or a test suffix.
+fn stem(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+    let mut base = name.split('.').next().unwrap_or_default();
+    base = base.strip_suffix("_test").unwrap_or(base);
+    base.to_string()
 }
 
 /// ASCII words and numbers, split at camelCase boundaries, lowercased, at least two long:
@@ -265,6 +296,26 @@ mod tests {
         let t = tokens(&[file('M', "Cargo.toml"), file('M', "Cargo.lock")], "", "");
         assert!(t.meta.contains(&"deps-only".to_string()));
         assert!(t.msg.is_empty());
+    }
+
+    #[test]
+    fn scope_tokens_are_prefixes_and_stems() {
+        let t = scope_tokens(&[
+            file('M', "packages/runtime-core/src/components/Suspense.spec.ts"),
+            file('M', "Cargo.lock"),
+        ]);
+        assert_eq!(
+            t,
+            [
+                "p:packages",
+                "p:packages/runtime-core",
+                "p:packages/runtime-core/src",
+                "p:packages/runtime-core/src/components",
+                "p:packages/runtime-core/src/components/Suspense.spec.ts",
+                "s:suspense",
+            ]
+        );
+        assert_eq!(stem("src/config_test.go"), "config");
     }
 
     #[test]

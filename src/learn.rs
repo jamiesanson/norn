@@ -17,9 +17,9 @@ use std::sync::OnceLock;
 
 use crate::classify;
 use crate::config::Config;
-use crate::diff::{self, Changes};
+use crate::diff::{self, ChangedFile, Changes};
 use crate::eval;
-use crate::features::Tokens;
+use crate::features::{self, Tokens};
 use crate::lbfgs;
 use crate::model::{self, Model};
 
@@ -37,6 +37,11 @@ const MAX_SAME_SUBJECT: usize = 3;
 /// A term the built-in model lacks becomes a feature once this many commits use it.
 const MIN_DF: usize = 2;
 const MAX_ITERATIONS: usize = 300;
+/// The scope model's class for commits without a scope. Not a valid scope itself.
+const NO_SCOPE: &str = "(none)";
+/// A commit this many commits older counts half as much towards the scope model.
+const SCOPE_HALF_LIFE: f64 = 100.0;
+const SCOPE_C: f64 = 10.0;
 
 pub struct Options {
     pub limit: usize,
@@ -78,6 +83,10 @@ pub struct Learned {
     pub commits: usize,
     /// Each type and how many commits had it, most common first.
     pub types: Vec<(String, usize)>,
+    /// Each scope and how many commits had it, most common first.
+    pub scopes: Vec<(String, usize)>,
+    /// Commits the scope model learned from, with or without a scope.
+    pub scope_commits: usize,
     pub path: PathBuf,
 }
 
@@ -98,15 +107,24 @@ pub fn run(options: &Options, config: &Config) -> Result<Learned, String> {
         .collect();
     let commits = limit_bots(commits);
 
-    let docs = eval::map_commits(&commits, |commit| {
+    let read = eval::map_commits(&commits, |commit| {
         let changes = Changes::Commit(&commit.sha);
         let files = diff::changed_files(changes)?;
         let message = commit.message(with_message(&commit.sha));
         let tokens =
             classify::model_tokens(changes, &files, &exclude, message, &config.types.value)?;
-        Ok::<_, String>(tokens.map(|t| (t, commit.label().kind.to_string())))
+        let label = commit.label();
+        Ok::<_, String>((
+            tokens.map(|t| (t, label.kind.to_string())),
+            (
+                features::scope_tokens(&files),
+                label.scope.map(str::to_string),
+            ),
+        ))
     });
-    let docs: Vec<(Tokens, String)> = docs.into_iter().filter_map(|d| d.ok().flatten()).collect();
+    // Commits the local rules answer still say which scope their paths belong to.
+    let (docs, scope_docs): (Vec<_>, Vec<_>) = read.into_iter().filter_map(Result::ok).unzip();
+    let docs: Vec<(Tokens, String)> = docs.into_iter().flatten().collect();
     if docs.len() < MIN_COMMITS {
         let s = if docs.len() == 1 { "" } else { "s" };
         return Err(format!(
@@ -118,6 +136,10 @@ pub fn run(options: &Options, config: &Config) -> Result<Learned, String> {
     let learned = finetune(model::shared()?, &docs);
     let path = model_path().ok_or("not in a git repository")?;
     save(&path, &learned.to_bytes())?;
+    save(
+        &scope_model_path(&path),
+        &scope_model(&scope_docs).to_bytes(),
+    )?;
 
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for (_, kind) in &docs {
@@ -128,9 +150,20 @@ pub fn run(options: &Options, config: &Config) -> Result<Learned, String> {
         .map(|(k, n)| (k.to_string(), n))
         .collect();
     types.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for scope in scope_docs.iter().filter_map(|(_, s)| s.as_deref()) {
+        *counts.entry(scope).or_default() += 1;
+    }
+    let mut scopes: Vec<(String, usize)> = counts
+        .into_iter()
+        .map(|(k, n)| (k.to_string(), n))
+        .collect();
+    scopes.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     Ok(Learned {
         commits: docs.len(),
         types,
+        scopes,
+        scope_commits: scope_docs.len(),
         path,
     })
 }
@@ -187,6 +220,22 @@ pub fn model_path() -> Option<PathBuf> {
     })
 }
 
+/// The learned scope model, beside the learned type model.
+fn scope_model_path(model_path: &std::path::Path) -> PathBuf {
+    model_path.with_file_name("scopes.bin")
+}
+
+/// This repository's learned scope model, if `norn learn` has made one.
+pub fn learned_scopes() -> Option<&'static Model> {
+    static SCOPES: OnceLock<Option<Model>> = OnceLock::new();
+    SCOPES
+        .get_or_init(|| {
+            let bytes = std::fs::read(scope_model_path(&model_path()?)).ok()?;
+            Model::from_bytes(&bytes).ok()
+        })
+        .as_ref()
+}
+
 /// The model `classifier = "local"` uses: this repository's learned one if there is one,
 /// otherwise the built-in model.
 pub fn active_model() -> Result<&'static Model, String> {
@@ -216,22 +265,39 @@ fn save(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
 /// `base` refitted on `docs`, each a commit's tokens and its type.
 pub fn finetune(base: &Model, docs: &[(Tokens, String)]) -> Model {
     let mut model = extend(base, docs);
-    let k = model.classes.len();
     let labels: Vec<usize> = docs
         .iter()
         .map(|(_, kind)| model.classes.iter().position(|c| c == kind).unwrap())
         .collect();
     let rows: Vec<Vec<(usize, f64)>> = docs.iter().map(|(t, _)| model.vectorize(t)).collect();
+    fit(&mut model, &rows, &labels, &vec![1.0; rows.len()], C, true);
+    model
+}
 
+/// Fits `model`'s weights by L-BFGS, minimising
+///
+///     c * sum(weight * cross-entropy) + 1/2 ||W - W_now||^2
+///
+/// plus the same penalty on the intercepts when `penalise_intercepts`. The model's current
+/// weights are the prior. `rows` are vectorised commits and `labels` their class indices.
+fn fit(
+    model: &mut Model,
+    rows: &[Vec<(usize, f64)>],
+    labels: &[usize],
+    weights: &[f64],
+    c: f64,
+    penalise_intercepts: bool,
+) {
+    let k = model.classes.len();
     // A feature no commit uses gets no pull from the data, so the penalty holds it at its
-    // built-in value. Only the features that appear need fitting.
+    // prior value. Only the features that appear need fitting.
     let mut active: Vec<usize> = rows.iter().flatten().map(|&(f, _)| f).collect();
     active.sort_unstable();
     active.dedup();
     let slot: HashMap<usize, usize> = active.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let rows: Vec<Vec<(usize, f64)>> = rows
-        .into_iter()
-        .map(|r| r.into_iter().map(|(f, v)| (slot[&f], v)).collect())
+        .iter()
+        .map(|r| r.iter().map(|&(f, v)| (slot[&f], v)).collect())
         .collect();
 
     // The parameters: each active feature's weight per class, then the intercepts.
@@ -241,12 +307,18 @@ pub fn finetune(base: &Model, docs: &[(Tokens, String)]) -> Model {
         prior.extend(model.weights[f * k..(f + 1) * k].iter().map(|&w| w as f64));
     }
     prior.extend(model.intercepts.iter().map(|&b| b as f64));
+    let penalised = if penalise_intercepts {
+        a * k + k
+    } else {
+        a * k
+    };
 
     let theta = lbfgs::minimize(
         prior.clone(),
         |theta, grad| {
             let mut value = 0.0;
-            for i in 0..theta.len() {
+            grad.fill(0.0);
+            for i in 0..penalised {
                 let d = theta[i] - prior[i];
                 value += 0.5 * d * d;
                 grad[i] = d;
@@ -254,7 +326,7 @@ pub fn finetune(base: &Model, docs: &[(Tokens, String)]) -> Model {
             let (w, b) = theta.split_at(a * k);
             let (gw, gb) = grad.split_at_mut(a * k);
             let mut scores = vec![0.0; k];
-            for (x, &y) in rows.iter().zip(&labels) {
+            for ((x, &y), &weight) in rows.iter().zip(labels).zip(weights) {
                 scores.copy_from_slice(b);
                 for &(s, v) in x {
                     for c in 0..k {
@@ -263,12 +335,13 @@ pub fn finetune(base: &Model, docs: &[(Tokens, String)]) -> Model {
                 }
                 let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 let log_total = scores.iter().map(|s| (s - max).exp()).sum::<f64>().ln() + max;
-                value -= C * (scores[y] - log_total);
-                for c in 0..k {
-                    let error = C * ((scores[c] - log_total).exp() - f64::from(c == y));
-                    gb[c] += error;
+                let scale = c * weight;
+                value -= scale * (scores[y] - log_total);
+                for class in 0..k {
+                    let error = scale * ((scores[class] - log_total).exp() - f64::from(class == y));
+                    gb[class] += error;
                     for &(s, v) in x {
-                        gw[s * k + c] += error * v;
+                        gw[s * k + class] += error * v;
                     }
                 }
             }
@@ -278,14 +351,87 @@ pub fn finetune(base: &Model, docs: &[(Tokens, String)]) -> Model {
     );
 
     for (i, &f) in active.iter().enumerate() {
-        for c in 0..k {
-            model.weights[f * k + c] = theta[i * k + c] as f32;
+        for class in 0..k {
+            model.weights[f * k + class] = theta[i * k + class] as f32;
         }
     }
-    for c in 0..k {
-        model.intercepts[c] = theta[a * k + c] as f32;
+    for class in 0..k {
+        model.intercepts[class] = theta[a * k + class] as f32;
     }
+}
+
+/// A model of which scope this repository files changes under, from `docs`: each commit's
+/// scope tokens and scope, newest first. Newer commits count for more, because projects'
+/// habits drift. Scopes are the project's own, so it starts from nothing.
+pub fn scope_model(docs: &[(Vec<String>, Option<String>)]) -> Model {
+    let label = |s: &Option<String>| s.clone().unwrap_or_else(|| NO_SCOPE.to_string());
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for (_, scope) in docs {
+        *counts.entry(label(scope)).or_default() += 1;
+    }
+    let mut classes: Vec<(String, usize)> = counts.into_iter().collect();
+    classes.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let classes: Vec<String> = classes.into_iter().map(|(c, _)| c).collect();
+
+    let mut df: HashMap<&str, usize> = HashMap::new();
+    for (tokens, _) in docs {
+        for t in tokens.iter().map(String::as_str).collect::<HashSet<_>>() {
+            *df.entry(t).or_default() += 1;
+        }
+    }
+    let mut terms: Vec<(&str, usize)> = df.into_iter().collect();
+    terms.sort_unstable();
+    let n = docs.len() as f64;
+    let idf = terms
+        .iter()
+        .map(|&(_, d)| (((1.0 + n) / (1.0 + d as f64)).ln() + 1.0) as f32)
+        .collect();
+    let k = classes.len();
+    let mut model = Model::new(
+        classes,
+        vec![(
+            "scope".to_string(),
+            1.0,
+            terms.iter().map(|(t, _)| t.to_string()).collect(),
+        )],
+        idf,
+        vec![0.0; terms.len() * k],
+        vec![0.0; k],
+    )
+    .expect("sizes are consistent");
+
+    let rows: Vec<Vec<(usize, f64)>> = docs
+        .iter()
+        .map(|(scope, _)| {
+            model.vectorize(&Tokens {
+                scope: scope.clone(),
+                ..Tokens::default()
+            })
+        })
+        .collect();
+    let labels: Vec<usize> = docs
+        .iter()
+        .map(|(_, s)| model.classes.iter().position(|c| *c == label(s)).unwrap())
+        .collect();
+    let weights: Vec<f64> = (0..docs.len())
+        .map(|i| 0.5f64.powf(i as f64 / SCOPE_HALF_LIFE))
+        .collect();
+    fit(&mut model, &rows, &labels, &weights, SCOPE_C, false);
     model
+}
+
+/// The scope `model` picks for a change, if any.
+pub fn predict_scope(model: &Model, files: &[ChangedFile]) -> Option<String> {
+    let p = model.predict(&Tokens {
+        scope: features::scope_tokens(files),
+        ..Tokens::default()
+    });
+    let best = p
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(i, _)| &model.classes[i])?;
+    (best != NO_SCOPE).then(|| best.clone())
 }
 
 /// `base` with the types and terms `docs` use that it doesn't know, all weighted zero.
@@ -405,6 +551,62 @@ mod tests {
         let extended = extend(&tiny(), &docs);
         assert!(extended.blocks[0].feature("m:twice").is_some());
         assert!(extended.blocks[0].feature("m:once").is_none());
+    }
+
+    fn file(path: &str) -> ChangedFile {
+        ChangedFile {
+            status: 'M',
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn learns_scopes_and_their_absence() {
+        let mut docs = Vec::new();
+        for _ in 0..10 {
+            for (path, scope) in [
+                (
+                    "packages/runtime-core/src/apiWatch.ts",
+                    Some("runtime-core"),
+                ),
+                ("packages/compiler-sfc/src/parse.ts", Some("compiler-sfc")),
+                ("scripts/release.js", None),
+            ] {
+                docs.push((
+                    features::scope_tokens(&[file(path)]),
+                    scope.map(String::from),
+                ));
+            }
+        }
+        let model = scope_model(&docs);
+        let scope = |path| predict_scope(&model, &[file(path)]);
+        assert_eq!(
+            scope("packages/runtime-core/src/hydration.ts").as_deref(),
+            Some("runtime-core")
+        );
+        assert_eq!(
+            scope("packages/compiler-sfc/src/compileScript.ts").as_deref(),
+            Some("compiler-sfc")
+        );
+        assert_eq!(scope("scripts/build.js"), None);
+    }
+
+    #[test]
+    fn newer_scope_habits_win() {
+        // The newest 80 of 200 commits use a scope that older ones didn't.
+        let mut docs = Vec::new();
+        for i in 0..200 {
+            let scope = (i < 80).then(|| "editor".to_string());
+            docs.push((
+                features::scope_tokens(&[file("packages/editor/src/App.tsx")]),
+                scope,
+            ));
+        }
+        let model = scope_model(&docs);
+        assert_eq!(
+            predict_scope(&model, &[file("packages/editor/src/Canvas.tsx")]).as_deref(),
+            Some("editor")
+        );
     }
 
     #[test]
