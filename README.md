@@ -34,8 +34,9 @@ or build from source with `cargo install --path .`. Then, in each repository:
 norn install
 ```
 
-`install` won't overwrite existing `prepare-commit-msg`, `commit-msg` or `post-commit`
-hooks; add `norn <hook> "$@"` to them yourself. To try norn without committing, stage some changes and
+`install` won't overwrite hooks it didn't write. If you have your own `prepare-commit-msg`
+or `commit-msg`, add `norn <hook> "$@"` to it yourself; your own `post-commit` is left
+alone. To try norn without committing, stage some changes and
 run `norn classify "your message"`.
 
 ## How it works

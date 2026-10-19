@@ -80,6 +80,10 @@ CONFIGURATION:
 ";
 
 const HOOK_MARKER: &str = "# installed by norn";
+/// The hooks norn can't work without.
+const REQUIRED_HOOKS: [&str; 2] = ["prepare-commit-msg", "commit-msg"];
+/// Records which commits norn labelled. Optional: without it, they just count as yours.
+const LABELS_HOOK: &str = "post-commit";
 const BIN_NAME: &str = if cfg!(windows) { "norn.exe" } else { "norn" };
 
 fn main() -> ExitCode {
@@ -228,14 +232,11 @@ fn prepare_commit_msg(file: &Path, source: Option<&str>, config: &Config) -> Res
     let min_confidence = config.min_confidence.value;
     if classification.confidence < min_confidence {
         let guesses = top_guesses(&classification);
-        if flow == labels::Flow::Editor {
+        if flow == labels::Flow::Editor && git_strips_comments() {
             let hint = format!("norn isn't sure: {guesses}?");
             return write_atomic(file, &message::add_hint(&content, &hint));
         }
-        return Err(format!(
-            "not sure: {guesses}, below {:.0}% confidence",
-            min_confidence * 100.0
-        ));
+        return Err(format!("not sure: {guesses}"));
     }
 
     write_atomic(
@@ -249,6 +250,23 @@ fn prepare_commit_msg(file: &Path, source: Option<&str>, config: &Config) -> Res
         flow,
     );
     Ok(())
+}
+
+/// Whether git will drop `#` comment lines from the message, as it does by default. With
+/// another `commit.cleanup` mode or comment character, a hint would end up in the commit.
+fn git_strips_comments() -> bool {
+    let get = |key: &str| {
+        Command::new("git")
+            .args(["config", "--get", key])
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    get("commit.cleanup").is_none_or(|mode| matches!(mode.as_str(), "strip" | "default"))
+        && get("core.commentChar").is_none_or(|c| c == "#")
+        && get("core.commentString").is_none_or(|c| c == "#")
 }
 
 /// The two likeliest prefixes, such as `fix(config) (48%) or feat(config) (31%)`.
@@ -649,15 +667,27 @@ fn install() -> Result<(), String> {
     let hooks_dir = git_hooks_dir()?;
     std::fs::create_dir_all(&hooks_dir).map_err(|e| e.to_string())?;
 
-    for hook in ["prepare-commit-msg", "commit-msg", "post-commit"] {
-        let path = hooks_dir.join(hook);
-        if let Ok(existing) = std::fs::read_to_string(&path)
-            && !existing.contains(HOOK_MARKER)
-        {
+    let ours = |hook: &str| match std::fs::read_to_string(hooks_dir.join(hook)) {
+        Ok(existing) => existing.contains(HOOK_MARKER),
+        Err(_) => true,
+    };
+    // Checked before writing anything, so a refusal leaves the repository as it was.
+    for hook in REQUIRED_HOOKS {
+        if !ours(hook) {
             return Err(format!(
                 "{} already exists and wasn't installed by norn; add `norn {hook} \"$@\"` to it instead",
-                path.display()
+                hooks_dir.join(hook).display()
             ));
+        }
+    }
+    for hook in REQUIRED_HOOKS.into_iter().chain([LABELS_HOOK]) {
+        let path = hooks_dir.join(hook);
+        if hook == LABELS_HOOK && !ours(hook) {
+            out!(
+                "left {} alone; add `norn {hook}` to it so norn can tell its own labels from yours",
+                path.display()
+            );
+            continue;
         }
         std::fs::write(&path, hook_script(hook, &exe)).map_err(|e| e.to_string())?;
         make_executable(&path)?;

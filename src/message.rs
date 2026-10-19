@@ -77,8 +77,6 @@ pub fn apply_prefix(content: &str, prefix: &str) -> String {
     out
 }
 
-/// True when the message is nothing but a prefix this tool added, so the user
-/// never wrote a description. Clearing it lets git abort as for any empty message.
 /// `content` with `hint` as a comment line, just above git's own comments, where the editor
 /// shows it and git leaves it out of the commit.
 pub fn add_hint(content: &str, hint: &str) -> String {
@@ -94,6 +92,8 @@ pub fn add_hint(content: &str, hint: &str) -> String {
     out
 }
 
+/// True when the message is nothing but a prefix this tool added, so the user
+/// never wrote a description. Clearing it lets git abort as for any empty message.
 pub fn is_bare_prefix(content: &str) -> bool {
     let body = body(content);
     !body.contains('\n') && body.ends_with(':') && is_conventional(&format!("{body} x"))

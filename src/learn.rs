@@ -154,7 +154,7 @@ pub fn run(options: &Options, config: &Config) -> Result<Learned, String> {
         scope_docs.into_iter().map(|(t, s, w)| ((t, s), w)).unzip();
     if docs.len() < MIN_COMMITS {
         // Recorded anyway, so the hook tries again once the history has grown.
-        record_learned_at();
+        mark_learned(options.skip);
         let s = if docs.len() == 1 { "" } else { "s" };
         return Err(format!(
             "only {} conventional commit{s} to learn from, and norn needs {MIN_COMMITS}",
@@ -169,7 +169,7 @@ pub fn run(options: &Options, config: &Config) -> Result<Learned, String> {
         &scope_model_path(&path),
         &scope_model(&scope_docs, &scope_weights).to_bytes(),
     )?;
-    record_learned_at();
+    mark_learned(options.skip);
 
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for (_, kind) in &docs {
@@ -239,16 +239,11 @@ fn with_message(sha: &str) -> bool {
 
 /// Where the learned model lives: in the git directory, shared by every worktree.
 pub fn model_path() -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    output.status.success().then(|| {
-        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
-            .join("norn")
-            .join("model.bin")
-    })
+    // Asked several times per commit, and the answer can't change while norn runs.
+    static GIT_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let git_dir =
+        GIT_DIR.get_or_init(|| git_output(&["rev-parse", "--git-common-dir"]).map(PathBuf::from));
+    Some(git_dir.as_ref()?.join("norn").join("model.bin"))
 }
 
 /// norn's directory inside the repository's git directory.
@@ -269,10 +264,16 @@ fn git_output(args: &[&str]) -> Option<String> {
 }
 
 /// Notes the commit norn last learned at, so the hook can tell when the models are behind.
-fn record_learned_at() {
-    if let (Some(dir), Some(head)) = (norn_dir(), git_output(&["rev-parse", "HEAD"])) {
+/// A learn that skipped the newest commits, to evaluate on them, leaves models that are
+/// behind on purpose, so the note is removed instead and the next commit re-learns.
+fn mark_learned(skipped: usize) {
+    let Some(dir) = norn_dir() else { return };
+    let marker = dir.join("learned");
+    if skipped > 0 {
+        let _ = std::fs::remove_file(marker);
+    } else if let Some(head) = git_output(&["rev-parse", "HEAD"]) {
         let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("learned"), head + "\n");
+        let _ = std::fs::write(marker, head + "\n");
     }
 }
 
