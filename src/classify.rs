@@ -1,7 +1,7 @@
 //! Decides the conventional commit type, scope and breaking flag for a staged diff.
 //!
 //! Local rules answer obvious cases for free. Everything else goes to the classifier: one
-//! Jev call, or the model built into jev-cc.
+//! Jev call, or the model built into norn.
 
 use std::collections::BTreeMap;
 
@@ -21,7 +21,7 @@ pub enum Source {
     /// The path rules (docs, tests or CI only).
     Rules,
     Jev,
-    /// The model built into jev-cc.
+    /// The model built into norn.
     Model,
 }
 
@@ -123,7 +123,7 @@ pub fn classify(
 }
 
 /// The request `classify` would send, or `None` when the local rules answer without one.
-/// `jev-cc export` writes these as training data, so a model learns from what it will see.
+/// `norn export` writes these as training data, so a model learns from what it will see.
 pub fn request_for<'a>(
     changes: Changes,
     files: &[ChangedFile],

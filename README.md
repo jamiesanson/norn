@@ -1,4 +1,7 @@
-# jev-conventional-commits
+# norn
+
+In Norse mythology, the [norns](https://en.wikipedia.org/wiki/Norns) decide the fate of
+everything. This one just decides what kind of change your commit is.
 
 A fast git hook that classifies your staged diff and prefixes your commit message with
 [Conventional Commits](https://www.conventionalcommits.org/) syntax. It runs on your machine,
@@ -14,7 +17,7 @@ fix(config): handle empty config files
 
 - **You** write the description.
 - **A classifier** picks the `type` (`feat`, `fix`, `docs`, …). By default it's a small model
-  built into jev-cc, trained on public conventional-commit history. With Jev instead, the
+  built into norn, trained on public conventional-commit history. With Jev instead, the
   type is more accurate, and Jev also decides whether the change is breaking (`!`).
 - **Local rules** pick the `scope` from the paths you changed, and skip the classifier when
   the answer is obvious (for example, a docs-only diff).
@@ -27,39 +30,39 @@ unchanged.
 macOS and Linux:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jamiesanson/jev-conventional-commits/releases/latest/download/jev-cc-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jamiesanson/norn/releases/latest/download/norn-installer.sh | sh
 ```
 
 Windows:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/jamiesanson/jev-conventional-commits/releases/latest/download/jev-cc-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/jamiesanson/norn/releases/latest/download/norn-installer.ps1 | iex"
 ```
 
 Prebuilt archives for each platform are also on the
-[releases page](https://github.com/jamiesanson/jev-conventional-commits/releases). To build from
+[releases page](https://github.com/jamiesanson/norn/releases). To build from
 source, run `cargo install --path .`.
 
 Then, in each repository:
 
 ```sh
-jev-cc install
+norn install
 ```
 
 To use Jev, set `classifier = "jev"` (see [Configuration](#configuration)) and run
-`jev-cc jev login` once to save your TypeSafe API key.
+`norn jev login` once to save your TypeSafe API key.
 
 With `git commit -m`, the prefix goes in front of your message. With the editor, the first
 line is pre-filled (e.g. `fix(config): `) for you to finish.
 
 `install` won't overwrite existing `prepare-commit-msg` or `commit-msg` hooks. Add
-`jev-cc <hook> "$@"` to them yourself.
+`norn <hook> "$@"` to them yourself.
 
 Try it without committing:
 
 ```console
 $ git add -p
-$ jev-cc classify "handle empty config files"
+$ norn classify "handle empty config files"
 fix(config): handle empty config files
   source: Model, confidence: 97%, took 37ms
 ```
@@ -68,12 +71,12 @@ fix(config): handle empty config files
 
 Settings are read from these places, each overriding the one before:
 
-1. `~/.config/jev-cc/config.toml`, for your own defaults
-2. `.jev-cc.toml` at the repository root, for settings shared with your team
+1. `~/.config/norn/config.toml`, for your own defaults
+2. `.norn.toml` at the repository root, for settings shared with your team
 3. environment variables
 
 ```toml
-# .jev-cc.toml
+# .norn.toml
 min_confidence = 0.75
 exclude = ["secrets/**", "**/*.pem"]
 types = ["feat", "fix", "docs", "refactor", "test", "chore"]
@@ -86,16 +89,16 @@ types = ["feat", "fix", "docs", "refactor", "test", "chore"]
 
 | Setting | Environment variable | Default | |
 |---|---|---|---|
-| `timeout_ms` | `JEV_CC_TIMEOUT_MS` | `1000` | Request timeout |
-| `deadline_ms` | `JEV_CC_DEADLINE_MS` | `2000` | Time limit for the whole hook |
-| `min_confidence` | `JEV_CC_MIN_CONFIDENCE` | `0.6` | Minimum confidence to apply a type |
-| `breaking_threshold` | `JEV_CC_BREAKING_THRESHOLD` | `0.85` | Probability needed to add `!` |
-| `disable` | `JEV_CC_DISABLE` | `false` | |
-| `classifier` | `JEV_CC_CLASSIFIER` | `local` | `local` for the built-in model, or `jev`. Global config only |
+| `timeout_ms` | `NORN_TIMEOUT_MS` | `1000` | Request timeout |
+| `deadline_ms` | `NORN_DEADLINE_MS` | `2000` | Time limit for the whole hook |
+| `min_confidence` | `NORN_MIN_CONFIDENCE` | `0.6` | Minimum confidence to apply a type |
+| `breaking_threshold` | `NORN_BREAKING_THRESHOLD` | `0.85` | Probability needed to add `!` |
+| `disable` | `NORN_DISABLE` | `false` | |
+| `classifier` | `NORN_CLASSIFIER` | `local` | `local` for the built-in model, or `jev`. Global config only |
 | `exclude` | | `[]` | Paths never sent to Jev |
-| `types` | | all built-in types | Types jev-cc may choose from |
+| `types` | | all built-in types | Types norn may choose from |
 | `scopes` | | | Path prefixes mapped to scopes |
-| `base_url` | `JEV_CC_BASE_URL` | `https://api.typesafe.ai` | Global config only |
+| `base_url` | `NORN_BASE_URL` | `https://api.typesafe.ai` | Global config only |
 
 `exclude` patterns are
 [git glob pathspecs](https://git-scm.com/docs/gitglossary#Documentation/gitglossary.txt-aiddefpathspecapathspec),
@@ -118,13 +121,13 @@ Type names must be lowercase letters. A project's `types` replace your global on
 `scopes` entries from both files are combined, and the project's entry wins when both set
 the same path.
 
-`base_url` can't be set in `.jev-cc.toml`, so a repository you clone can't send your diffs
+`base_url` can't be set in `.norn.toml`, so a repository you clone can't send your diffs
 and API key somewhere else. Nor can `classifier`.
 
 The built-in model only chooses from the built-in types, and never marks a change breaking.
 
-Run `jev-cc config` to see the settings in effect and where each one comes from.
-`TYPESAFE_API_KEY` overrides the key saved by `jev-cc jev login`.
+Run `norn config` to see the settings in effect and where each one comes from.
+`TYPESAFE_API_KEY` overrides the key saved by `norn jev login`.
 
 ## Classification
 
@@ -150,7 +153,7 @@ Run `jev-cc config` to see the settings in effect and where each one comes from.
 
 With the built-in model, nothing leaves your machine.
 
-With `classifier = "jev"`, when the local rules can't decide, jev-cc sends the following to
+With `classifier = "jev"`, when the local rules can't decide, norn sends the following to
 TypeSafe (`api.typesafe.ai`, or your `base_url`):
 
 - the paths of your staged files, except those matched by `exclude`
@@ -170,18 +173,18 @@ don't use Jev in repositories whose code can't leave your machine.
 ```sh
 cargo test
 cargo build --release
-./target/release/jev-cc install   # dogfood: classify this repo's own commits
+./target/release/norn install   # dogfood: classify this repo's own commits
 ```
 
-To measure a change to classification, run `jev-cc eval` in a repository whose history
+To measure a change to classification, run `norn eval` in a repository whose history
 already uses conventional prefixes. It replays the last 50 labelled commits (`--limit`)
 through the classifier and reports accuracy and the most common mistakes. `--message` also
 sends each commit's description, as `git commit -m` would, and `--out FILE` writes every
 answer with Jev's probabilities as JSON lines. Set `types` in that repository's
-`.jev-cc.toml` to match its conventions first; many projects label dependency and CI
+`.norn.toml` to match its conventions first; many projects label dependency and CI
 updates `chore`, which the default types would call `build` and `ci`.
 
-`jev-cc export` writes the same commits as training data for a local model; see
+`norn export` writes the same commits as training data for a local model; see
 [`training/`](training/README.md).
 
 ### Releasing

@@ -1,4 +1,4 @@
-"""Fine-tunes Laya on the jev-cc commit dataset. Runs on Kaggle; `training/kaggle.py train`
+"""Fine-tunes Laya on the norn commit dataset. Runs on Kaggle; `training/kaggle.py train`
 pushes it with the settings below filled in.
 
 Writes the checkpoint to /kaggle/working/laya-commits and the run's log to

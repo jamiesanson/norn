@@ -1,9 +1,9 @@
 //! Layered settings. Each layer overrides the one before:
 //!
 //! 1. built-in defaults
-//! 2. the global file, `~/.config/jev-cc/config.toml`
-//! 3. the project file, `.jev-cc.toml` at the repository root
-//! 4. `JEV_CC_*` environment variables
+//! 2. the global file, `~/.config/norn/config.toml`
+//! 3. the project file, `.norn.toml` at the repository root
+//! 4. `NORN_*` environment variables
 //!
 //! The project file comes with whatever repository you clone, so it can't set anything
 //! that changes where your diffs and API key are sent (`base_url`, `classifier`), and its
@@ -22,10 +22,10 @@ use serde::de::IgnoredAny;
 
 use crate::jev::DEFAULT_BASE_URL;
 
-pub const PROJECT_FILE: &str = ".jev-cc.toml";
+pub const PROJECT_FILE: &str = ".norn.toml";
 const GLOBAL_FILE: &str = "config.toml";
 
-/// `$XDG_CONFIG_HOME/jev-cc`, `~/.config/jev-cc`, or `%APPDATA%\jev-cc` on Windows.
+/// `$XDG_CONFIG_HOME/norn`, `~/.config/norn`, or `%APPDATA%\norn` on Windows.
 pub fn dir() -> Option<PathBuf> {
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
@@ -35,7 +35,7 @@ pub fn dir() -> Option<PathBuf> {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config")))
     };
-    Some(base?.join("jev-cc"))
+    Some(base?.join("norn"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +101,7 @@ pub struct ScopeRule {
 pub enum Classifier {
     /// TypeSafe's Jev, over the network.
     Jev,
-    /// The model built into jev-cc. Nothing leaves your machine.
+    /// The model built into norn. Nothing leaves your machine.
     Local,
 }
 
@@ -232,7 +232,7 @@ fn resolve(
         false,
         global.disable,
         project.disable,
-        "JEV_CC_DISABLE",
+        "NORN_DISABLE",
         env,
         &mut w,
     );
@@ -240,7 +240,7 @@ fn resolve(
         Classifier::Local,
         global.classifier,
         None,
-        "JEV_CC_CLASSIFIER",
+        "NORN_CLASSIFIER",
         env,
         &mut w,
     );
@@ -248,7 +248,7 @@ fn resolve(
         DEFAULT_BASE_URL.to_string(),
         global.base_url,
         None,
-        "JEV_CC_BASE_URL",
+        "NORN_BASE_URL",
         env,
         &mut w,
     );
@@ -256,7 +256,7 @@ fn resolve(
         1000,
         global.timeout_ms,
         project.timeout_ms,
-        "JEV_CC_TIMEOUT_MS",
+        "NORN_TIMEOUT_MS",
         env,
         &mut w,
     );
@@ -264,7 +264,7 @@ fn resolve(
         2000,
         global.deadline_ms,
         project.deadline_ms,
-        "JEV_CC_DEADLINE_MS",
+        "NORN_DEADLINE_MS",
         env,
         &mut w,
     );
@@ -272,7 +272,7 @@ fn resolve(
         0.6,
         global.min_confidence,
         project.min_confidence,
-        "JEV_CC_MIN_CONFIDENCE",
+        "NORN_MIN_CONFIDENCE",
         env,
         &mut w,
     );
@@ -280,7 +280,7 @@ fn resolve(
         0.85,
         global.breaking_threshold,
         project.breaking_threshold,
-        "JEV_CC_BREAKING_THRESHOLD",
+        "NORN_BREAKING_THRESHOLD",
         env,
         &mut w,
     );
@@ -364,7 +364,7 @@ pub fn built_in_types() -> Vec<TypeDef> {
         .collect()
 }
 
-/// Type names must be lowercase letters, so jev-cc recognises its own prefixes later.
+/// Type names must be lowercase letters, so norn recognises its own prefixes later.
 fn valid_type_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase())
 }
@@ -544,7 +544,7 @@ mod tests {
     fn project_overrides_global_and_env_overrides_both() {
         let global = file("timeout_ms = 500\nmin_confidence = 0.5\ndeadline_ms = 3000");
         let project = file("timeout_ms = 800\nmin_confidence = 0.75");
-        let env = |name: &str| (name == "JEV_CC_MIN_CONFIDENCE").then(|| "0.9".to_string());
+        let env = |name: &str| (name == "NORN_MIN_CONFIDENCE").then(|| "0.9".to_string());
         let c = resolve(Some(global), Some(project), &env, vec![]);
         assert_eq!(
             c.deadline_ms,
@@ -564,7 +564,7 @@ mod tests {
             c.min_confidence,
             Setting {
                 value: 0.9,
-                source: Source::Env("JEV_CC_MIN_CONFIDENCE")
+                source: Source::Env("NORN_MIN_CONFIDENCE")
             }
         );
     }
@@ -582,9 +582,9 @@ mod tests {
         let global = file("base_url = \"https://proxy.internal\"");
         let c = resolve(Some(global), None, &no_env, vec![]);
         assert_eq!(c.base_url.value, "https://proxy.internal");
-        let env = |name: &str| (name == "JEV_CC_BASE_URL").then(|| "http://localhost:1".into());
+        let env = |name: &str| (name == "NORN_BASE_URL").then(|| "http://localhost:1".into());
         let c = resolve(None, None, &env, vec![]);
-        assert_eq!(c.base_url.source, Source::Env("JEV_CC_BASE_URL"));
+        assert_eq!(c.base_url.source, Source::Env("NORN_BASE_URL"));
     }
 
     #[test]
@@ -600,10 +600,10 @@ mod tests {
         assert_eq!(c.classifier.value, Classifier::Local);
         assert!(c.warnings[0].contains("classifier"));
 
-        let env = |name: &str| (name == "JEV_CC_CLASSIFIER").then(|| "Jev".to_string());
+        let env = |name: &str| (name == "NORN_CLASSIFIER").then(|| "Jev".to_string());
         let c = resolve(None, None, &env, vec![]);
         assert_eq!(c.classifier.value, Classifier::Jev);
-        assert_eq!(c.classifier.source, Source::Env("JEV_CC_CLASSIFIER"));
+        assert_eq!(c.classifier.source, Source::Env("NORN_CLASSIFIER"));
     }
 
     #[test]
@@ -700,23 +700,23 @@ mod tests {
 
     #[test]
     fn invalid_env_value_is_ignored_with_warning() {
-        let env = |name: &str| (name == "JEV_CC_TIMEOUT_MS").then(|| "soon".to_string());
+        let env = |name: &str| (name == "NORN_TIMEOUT_MS").then(|| "soon".to_string());
         let c = resolve(None, None, &env, vec![]);
         assert_eq!(c.timeout_ms.source, Source::Default);
-        assert!(c.warnings[0].contains("JEV_CC_TIMEOUT_MS=soon"));
+        assert!(c.warnings[0].contains("NORN_TIMEOUT_MS=soon"));
     }
 
     #[test]
     fn env_disable_accepts_common_spellings() {
         for (raw, expected) in [("1", true), ("TRUE", true), ("0", false), ("false", false)] {
-            let env = move |name: &str| (name == "JEV_CC_DISABLE").then(|| raw.to_string());
+            let env = move |name: &str| (name == "NORN_DISABLE").then(|| raw.to_string());
             assert_eq!(resolve(None, None, &env, vec![]).disable.value, expected);
         }
     }
 
     #[test]
     fn unknown_keys_and_bad_files_warn() {
-        let dir = std::env::temp_dir().join(format!("jev-cc-config-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("norn-config-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let unknown = dir.join("unknown.toml");
         std::fs::write(&unknown, "timeout_ms = 5\ntypo_setting = 1\n").unwrap();

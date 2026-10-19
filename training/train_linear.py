@@ -1,10 +1,10 @@
-"""Trains the local model jev-cc ships: TF-IDF per token block and logistic regression.
+"""Trains the local model norn ships: TF-IDF per token block and logistic regression.
 
-    python3 training/train_linear.py --jev-cc target/release/jev-cc --data ~/jev-cc-dataset
+    python3 training/train_linear.py --norn target/release/norn --data ~/norn-dataset
 
-Tokens come from `jev-cc features`, so training sees exactly what jev-cc computes at commit
+Tokens come from `norn features`, so training sees exactly what norn computes at commit
 time. Writes `models/shared.bin` (the format `src/model.rs` reads), after checking that
-jev-cc's probabilities match scikit-learn's. Needs numpy and scikit-learn.
+norn's probabilities match scikit-learn's. Needs numpy and scikit-learn.
 """
 
 import argparse
@@ -28,9 +28,9 @@ def load(path):
     return [json.loads(line) for line in Path(path).read_text().split("\n") if line]
 
 
-def jev_cc_lines(jev_cc, args, path):
+def norn_lines(norn, args, path):
     with open(path, "rb") as f:
-        out = subprocess.run([jev_cc, *args], stdin=f, capture_output=True, check=True).stdout
+        out = subprocess.run([norn, *args], stdin=f, capture_output=True, check=True).stdout
     return [json.loads(line) for line in out.decode().split("\n") if line]
 
 
@@ -84,7 +84,7 @@ def write_model(path, features, model):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--jev-cc", required=True)
+    parser.add_argument("--norn", required=True)
     parser.add_argument("--data", required=True, type=Path, help="directory with train.jsonl and heldout.jsonl")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--features", type=int, default=20_000, help="features kept after pruning")
@@ -93,8 +93,8 @@ def main():
     data = args.data.expanduser()
 
     train_rows, heldout_rows = load(data / "train.jsonl"), load(data / "heldout.jsonl")
-    train = jev_cc_lines(args.jev_cc, ["features"], data / "train.jsonl")
-    heldout = jev_cc_lines(args.jev_cc, ["features"], data / "heldout.jsonl")
+    train = norn_lines(args.norn, ["features"], data / "train.jsonl")
+    heldout = norn_lines(args.norn, ["features"], data / "heldout.jsonl")
     y = [r["expected"]["type"] for r in train_rows]
     y_heldout = np.array([r["expected"]["type"] for r in heldout_rows])
 
@@ -104,7 +104,7 @@ def main():
           f"held-out accuracy {accuracy(full_features, full):.1%}")
 
     # Keep the features with the largest weight for any class, then refit on just those, so
-    # each block's normalisation covers exactly the terms jev-cc will know.
+    # each block's normalisation covers exactly the terms norn will know.
     importance = np.abs(full.coef_).max(0)
     keep = set(np.argsort(-importance)[:args.features])
     vocabularies, offset = {}, 0
@@ -119,18 +119,18 @@ def main():
     write_model(args.out, features, model)
     print(f"wrote {args.out} ({args.out.stat().st_size / 1e6:.2f} MB)")
 
-    # jev-cc must give the same probabilities as scikit-learn.
+    # norn must give the same probabilities as scikit-learn.
     sample = heldout_rows[:300]
     with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as f:
         f.write("".join(json.dumps(r) + "\n" for r in sample))
         f.flush()
-        ours = jev_cc_lines(args.jev_cc, ["features", "--model", str(args.out)], f.name)
+        ours = norn_lines(args.norn, ["features", "--model", str(args.out)], f.name)
     expected = model.predict_proba(features.transform(heldout[:300]))
     got = np.array([[p[c] for c in model.classes_] for p in ours])
     diff = np.abs(expected - got).max()
     print(f"parity: largest probability difference over {len(sample)} commits is {diff:.2e}")
     if diff > 1e-4:
-        sys.exit("jev-cc and scikit-learn disagree")
+        sys.exit("norn and scikit-learn disagree")
 
 
 if __name__ == "__main__":

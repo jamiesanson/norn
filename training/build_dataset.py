@@ -1,11 +1,11 @@
 """Builds a training set for a commit-type model from public conventional-commit history.
 
-Clones each repository in `repos.txt` (shallow, no checkout), runs `jev-cc export` over it,
+Clones each repository in `repos.txt` (shallow, no checkout), runs `norn export` over it,
 filters the rows and writes `train.jsonl` and `heldout.jsonl` in the format `laya-train`
 reads. Repositories under `[heldout]` are kept out of training entirely, so a fine-tune can
 be compared with Jev on repositories it has never seen.
 
-    python3 training/build_dataset.py --jev-cc target/release/jev-cc --out ~/jev-cc-dataset
+    python3 training/build_dataset.py --norn target/release/norn --out ~/norn-dataset
 
 Standard library only. Clones are deleted once exported, so peak disk use stays small.
 Each repository's rows are kept in `repos/` under the output directory, and a rerun reuses
@@ -84,7 +84,7 @@ def filter_rows(repo, args, work, empty_config):
 
         out = clone.parent / (clone.name + ".jsonl")
         env = dict(os.environ, XDG_CONFIG_HOME=str(empty_config))
-        subprocess.run([args.jev_cc, "export", "--message", "--out", str(out)], cwd=clone, env=env,
+        subprocess.run([args.norn, "export", "--message", "--out", str(out)], cwd=clone, env=env,
                        capture_output=True, text=True, check=True)
         exported = read_jsonl(out)
         out.unlink()
@@ -131,7 +131,7 @@ def filter_rows(repo, args, work, empty_config):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--jev-cc", required=True, help="path to the jev-cc binary")
+    parser.add_argument("--norn", required=True, help="path to the norn binary")
     parser.add_argument("--out", required=True, type=Path, help="directory to write the dataset to")
     parser.add_argument("--repos", type=Path, default=Path(__file__).with_name("repos.txt"))
     parser.add_argument("--depth", type=int, default=800, help="commits to clone per repository")
@@ -140,11 +140,11 @@ def main():
                         help="also label the breaking question (few commits are labelled breaking)")
     parser.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args()
-    args.jev_cc = str(Path(args.jev_cc).resolve())
+    args.norn = str(Path(args.norn).resolve())
 
     repos = read_repos(args.repos)
     args.out.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="jev-cc-dataset-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="norn-dataset-") as tmp:
         work, empty_config = Path(tmp), Path(tmp) / "config"
         empty_config.mkdir()
         for split, names in repos.items():

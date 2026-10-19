@@ -1,30 +1,30 @@
 # Training a local model
 
 This directory builds a dataset from public conventional-commit history and trains models on
-it: the linear model built into jev-cc (`classifier = "local"`), and experimentally a
+it: the linear model built into norn (`classifier = "local"`), and experimentally a
 fine-tuned [Laya](https://github.com/NandhaKishorM/laya) checkpoint.
 
 ## Build the dataset
 
 ```sh
 cargo build --release
-python3 training/build_dataset.py --jev-cc target/release/jev-cc --out ~/jev-cc-dataset
+python3 training/build_dataset.py --norn target/release/norn --out ~/norn-dataset
 ```
 
 This writes `train.jsonl` and `heldout.jsonl`, one commit per line, from the repositories in
-`repos.txt`. Each line is the request jev-cc would send for that commit, plus the type its
+`repos.txt`. Each line is the request norn would send for that commit, plus the type its
 author chose. Held-out repositories are never trained on.
 
 The rows have the `type` label only, because few commits are labelled breaking. Pass
 `--breaking` to label both questions.
 
-To export a single repository yourself, run `jev-cc export` in it.
+To export a single repository yourself, run `norn export` in it.
 
 ## Train the built-in model
 
 ```sh
 pip install numpy scikit-learn
-python3 training/train_linear.py --jev-cc target/release/jev-cc --data ~/jev-cc-dataset
+python3 training/train_linear.py --norn target/release/norn --data ~/norn-dataset
 cargo build --release
 ```
 
@@ -36,9 +36,9 @@ On a Mac (slow; start with a sample):
 
 ```sh
 pip install laya
-shuf -n 3000 ~/jev-cc-dataset/train.jsonl > sample.jsonl
+shuf -n 3000 ~/norn-dataset/train.jsonl > sample.jsonl
 laya-train --data sample.jsonl --base english --max-len 1024 --shuffle-options \
-           --eval-data ~/jev-cc-dataset/heldout.jsonl --out ./laya-commits
+           --eval-data ~/norn-dataset/heldout.jsonl --out ./laya-commits
 ```
 
 On Kaggle's free GPUs, `kaggle.py` uploads the dataset and runs `kaggle_train.py` as a private
@@ -49,7 +49,7 @@ with `chmod 600`. Then:
 ```sh
 pip install kaggle
 export KAGGLE_USERNAME=your-username
-python3 training/kaggle.py upload ~/jev-cc-dataset
+python3 training/kaggle.py upload ~/norn-dataset
 python3 training/kaggle.py train --sample 2000 --epochs 1   # a short run, to time it
 python3 training/kaggle.py status
 python3 training/kaggle.py download --log-only ./kaggle-run   # the log and before/after report
@@ -70,5 +70,5 @@ repositories:
 
 ```sh
 LAYA_EXTRA_MODELS='{"english": "./kaggle-run/laya-commits"}' LAYA_HOST=127.0.0.1 laya-serve
-JEV_CC_BASE_URL=http://127.0.0.1:8000 jev-cc eval --limit 60
+NORN_BASE_URL=http://127.0.0.1:8000 norn eval --limit 60
 ```

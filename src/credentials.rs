@@ -87,14 +87,14 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("jev-cc-test-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("norn-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
 
     #[test]
     fn save_load_delete_round_trip() {
-        let dir = temp_dir("round-trip").join("jev-cc");
+        let dir = temp_dir("round-trip").join("norn");
         assert_eq!(load(&dir), None);
         save(&dir, "  ts_key_123\n").unwrap();
         assert_eq!(load(&dir).as_deref(), Some("ts_key_123"));
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn key_file_is_private() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = temp_dir("perms").join("jev-cc");
+        let dir = temp_dir("perms").join("norn");
         let path = save(&dir, "secret").unwrap();
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600);

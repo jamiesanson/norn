@@ -1,9 +1,9 @@
 [package]
-name = "jev-cc"
+name = "norn"
 version = "0.2.0"
 edition = "2024"
-description = "Prefixes commit messages with Conventional Commits syntax using TypeSafe's Jev"
-repository = "https://github.com/jamiesanson/jev-conventional-commits"
+description = "Prefixes commit messages with Conventional Commits types, decided locally or by TypeSafe's Jev"
+repository = "https://github.com/jamiesanson/norn"
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

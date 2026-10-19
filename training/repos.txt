@@ -56,7 +56,7 @@ python-semantic-release/python-semantic-release
 lancedb/lancedb
 
 [heldout]
-# The repositories jev-cc's earlier evals used, plus two more, never trained on.
+# The repositories norn's earlier evals used, plus two more, never trained on.
 vuejs/core
 goreleaser/goreleaser
 release-plz/release-plz

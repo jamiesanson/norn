@@ -1,7 +1,7 @@
-//! `jev-cc eval`: replays commits that already have conventional prefixes and compares
-//! what jev-cc would have chosen with what the author wrote.
+//! `norn eval`: replays commits that already have conventional prefixes and compares
+//! what norn would have chosen with what the author wrote.
 //!
-//! `jev-cc export`: writes the same commits as labelled training data, one request per
+//! `norn export`: writes the same commits as labelled training data, one request per
 //! line with the author's answers, in the JSONL format `laya-train` reads.
 
 use std::collections::BTreeMap;
@@ -22,7 +22,7 @@ pub struct Options {
     pub limit: usize,
     /// Send each commit's description, as a user committing with `-m` would.
     pub with_message: bool,
-    /// Writes one JSON object per commit, for analysis outside jev-cc.
+    /// Writes one JSON object per commit, for analysis outside norn.
     pub out: Option<PathBuf>,
     pub rev: String,
 }
@@ -86,7 +86,7 @@ where
             options.rev
         ));
     }
-    eprintln!("jev-cc: evaluating {} commits", commits.len());
+    eprintln!("norn: evaluating {} commits", commits.len());
 
     let results = map_commits(&commits, |commit| {
         classify(&commit.sha, commit.message(options.with_message))
@@ -106,7 +106,7 @@ where
     Ok(())
 }
 
-/// `request` gives the request jev-cc would send for one commit (its sha and the message
+/// `request` gives the request norn would send for one commit (its sha and the message
 /// to send), or `None` when the local rules would answer without one.
 pub fn export<F>(options: &Options, types: &[String], request: F) -> Result<(), String>
 where
@@ -119,7 +119,7 @@ where
             options.rev
         ));
     }
-    eprintln!("jev-cc: exporting {} commits", commits.len());
+    eprintln!("norn: exporting {} commits", commits.len());
 
     let results = map_commits(&commits, |commit| {
         request(&commit.sha, commit.message(options.with_message))
@@ -147,7 +147,7 @@ where
     }
     out.flush().map_err(|e| e.to_string())?;
 
-    eprintln!("jev-cc: wrote {written} commits");
+    eprintln!("norn: wrote {written} commits");
     if local > 0 {
         eprintln!("skipped {local} commits the local rules answer without a request");
     }

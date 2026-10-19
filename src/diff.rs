@@ -16,7 +16,7 @@ pub struct ChangedFile {
 }
 
 /// Which changes to read: what's staged, or what an existing commit changed (used by
-/// `jev-cc eval` to replay history).
+/// `norn eval` to replay history).
 #[derive(Debug, Clone, Copy)]
 pub enum Changes<'a> {
     Staged,

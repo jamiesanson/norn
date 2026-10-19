@@ -1,7 +1,7 @@
 //! Turns a change into tokens for the local model, in four blocks that are weighted
 //! separately: the message, the changed paths, the patch, and the change's shape.
 //!
-//! This is the only implementation. `jev-cc features` runs it over training data, so the
+//! This is the only implementation. `norn features` runs it over training data, so the
 //! model is trained on exactly the tokens it sees at commit time.
 
 use crate::diff::{self, ChangedFile};
@@ -26,7 +26,7 @@ impl Tokens {
     }
 }
 
-/// `patch` is the trimmed patch jev-cc would send to Jev, so both see the same change.
+/// `patch` is the trimmed patch norn would send to Jev, so both see the same change.
 pub fn tokens(files: &[ChangedFile], patch: &str, message: &str) -> Tokens {
     let mut t = Tokens::default();
 

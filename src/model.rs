@@ -19,7 +19,7 @@ use crate::features::Tokens;
 const MAGIC: &[u8; 4] = b"JCCM";
 const VERSION: u32 = 1;
 
-/// The model trained on public conventional-commit history, built into jev-cc.
+/// The model trained on public conventional-commit history, built into norn.
 pub fn shared() -> Result<&'static Model, String> {
     static SHARED: LazyLock<Result<Model, String>> =
         LazyLock::new(|| Model::from_bytes(include_bytes!("../models/shared.bin")));
@@ -46,7 +46,7 @@ impl Model {
     pub fn from_bytes(bytes: &[u8]) -> Result<Model, String> {
         let mut r = Reader { bytes, at: 0 };
         if r.take(4)? != MAGIC {
-            return Err("not a jev-cc model".into());
+            return Err("not a norn model".into());
         }
         let version = r.u32()?;
         if version != VERSION {

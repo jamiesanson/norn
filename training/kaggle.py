@@ -1,6 +1,6 @@
 """Runs the fine-tune on Kaggle's free GPUs, using the Kaggle CLI (`pip install kaggle`).
 
-    python3 training/kaggle.py upload ~/jev-cc-dataset   # once, and after rebuilding the data
+    python3 training/kaggle.py upload ~/norn-dataset   # once, and after rebuilding the data
     python3 training/kaggle.py train --sample 2000 --epochs 1   # a short run to time things
     python3 training/kaggle.py train                     # the full run
     python3 training/kaggle.py status

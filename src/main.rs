@@ -16,46 +16,42 @@ use classify::{Classification, Settings};
 use config::Config;
 
 const USAGE: &str = "\
-jev-cc: prefix commit messages with Conventional Commits syntax using TypeSafe's Jev
+norn: prefix commit messages with Conventional Commits types, decided on your machine or by Jev
 
 USAGE:
-    jev-cc jev login                     Save your TypeSafe API key
-    jev-cc jev logout                    Remove the saved API key
-    jev-cc install                       Install the git hooks into the current repository
-    jev-cc classify [MESSAGE]            Classify the staged diff and print the prefix
-    jev-cc config                        Show the settings in effect and where each comes from
-    jev-cc eval [OPTIONS] [REV]          Compare jev-cc's choices with the prefixes in REV's history
+    norn jev login                     Save your TypeSafe API key
+    norn jev logout                    Remove the saved API key
+    norn install                       Install the git hooks into the current repository
+    norn classify [MESSAGE]            Classify the staged diff and print the prefix
+    norn config                        Show the settings in effect and where each comes from
+    norn eval [OPTIONS] [REV]          Compare norn's choices with the prefixes in REV's history
         --limit N      Commits to evaluate (default: 50)
         --message      Send each commit's description, as `git commit -m` would
         --out FILE     Also write each result as a JSON line
-    jev-cc export [OPTIONS] [REV]        Write REV's labelled commits as training data (JSONL)
+    norn export [OPTIONS] [REV]        Write REV's labelled commits as training data (JSONL)
         --limit N      Commits to export (default: all)
         --message      Include each commit's description, as `git commit -m` would
         --out FILE     Write to FILE instead of standard output
-    jev-cc prepare-commit-msg FILE [SOURCE] [SHA]   (git hook)
-    jev-cc commit-msg FILE                          (git hook)
+    norn prepare-commit-msg FILE [SOURCE] [SHA]   (git hook)
+    norn commit-msg FILE                          (git hook)
 
 CONFIGURATION:
-    Global:  ~/.config/jev-cc/config.toml
-    Project: .jev-cc.toml at the repository root (can't set classifier or base_url)
+    Global:  ~/.config/norn/config.toml
+    Project: .norn.toml at the repository root (can't set classifier or base_url)
     Environment variables override both:
 
-    JEV_CC_CLASSIFIER            `local` for the built-in model, or `jev` (default: local)
-    TYPESAFE_API_KEY             API key for Jev; overrides the key saved by `jev-cc jev login`
-    JEV_CC_BASE_URL              API base URL (default: https://api.typesafe.ai)
-    JEV_CC_TIMEOUT_MS            Request timeout; the message is left as-is on timeout (default: 1000)
-    JEV_CC_DEADLINE_MS           Time limit for the whole hook (default: 2000)
-    JEV_CC_MIN_CONFIDENCE        Minimum confidence to apply a type (default: 0.6)
-    JEV_CC_BREAKING_THRESHOLD    Probability needed to mark a change breaking (default: 0.85)
-    JEV_CC_DISABLE               Set to 1 to skip the hook entirely
+    NORN_CLASSIFIER          `local` for the built-in model, or `jev` (default: local)
+    TYPESAFE_API_KEY         API key for Jev; overrides the key saved by `norn jev login`
+    NORN_BASE_URL            API base URL (default: https://api.typesafe.ai)
+    NORN_TIMEOUT_MS          Request timeout; the message is left as-is on timeout (default: 1000)
+    NORN_DEADLINE_MS         Time limit for the whole hook (default: 2000)
+    NORN_MIN_CONFIDENCE      Minimum confidence to apply a type (default: 0.6)
+    NORN_BREAKING_THRESHOLD  Probability needed to mark a change breaking (default: 0.85)
+    NORN_DISABLE             Set to 1 to skip the hook entirely
 ";
 
-const HOOK_MARKER: &str = "# installed by jev-cc";
-const BIN_NAME: &str = if cfg!(windows) {
-    "jev-cc.exe"
-} else {
-    "jev-cc"
-};
+const HOOK_MARKER: &str = "# installed by norn";
+const BIN_NAME: &str = if cfg!(windows) { "norn.exe" } else { "norn" };
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -88,7 +84,7 @@ fn main() -> ExitCode {
         ["jev", "login"] => command_result(login()),
         ["jev", "logout"] => command_result(logout()),
         ["--version" | "-V"] => {
-            println!("jev-cc {}", env!("CARGO_PKG_VERSION"));
+            println!("norn {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         _ => {
@@ -102,7 +98,7 @@ fn command_result(result: Result<(), String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("jev-cc: {e}");
+            eprintln!("norn: {e}");
             ExitCode::FAILURE
         }
     }
@@ -111,7 +107,7 @@ fn command_result(result: Result<(), String>) -> ExitCode {
 /// Hooks never block a commit: failures are reported and the message is left alone.
 fn hook_result(result: Result<(), String>) -> ExitCode {
     if let Err(e) = result {
-        eprintln!("jev-cc: message left unchanged ({e})");
+        eprintln!("norn: message left unchanged ({e})");
     }
     ExitCode::SUCCESS
 }
@@ -133,7 +129,7 @@ fn command_config() -> Config {
 
 fn print_warnings(config: &Config) {
     for warning in &config.warnings {
-        eprintln!("jev-cc: {warning}");
+        eprintln!("norn: {warning}");
     }
 }
 
@@ -150,7 +146,7 @@ fn repo_root() -> Option<PathBuf> {
 }
 
 /// Ends the hook after the deadline, whatever it's waiting on (git, DNS, the API), so
-/// jev-cc can never hang a commit. Message writes are atomic, so exiting at any point
+/// norn can never hang a commit. Message writes are atomic, so exiting at any point
 /// leaves either the original message or the prefixed one.
 fn start_deadline(message_file: &Path, deadline_ms: u64) {
     let deadline = Duration::from_millis(deadline_ms);
@@ -159,7 +155,7 @@ fn start_deadline(message_file: &Path, deadline_ms: u64) {
         std::thread::sleep(deadline);
         let _ = std::fs::remove_file(&tmp);
         eprintln!(
-            "jev-cc: message left unchanged (took longer than {}ms)",
+            "norn: message left unchanged (took longer than {}ms)",
             deadline.as_millis()
         );
         std::process::exit(0);
@@ -227,7 +223,7 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
 
 fn tmp_path(path: &Path) -> PathBuf {
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".jev-cc.tmp");
+    tmp.push(".norn.tmp");
     PathBuf::from(tmp)
 }
 
@@ -262,7 +258,7 @@ fn run_eval(args: &[&str]) -> Result<(), String> {
     })
 }
 
-/// Reads `jev-cc export` rows on stdin and writes each one's tokens as a JSON line, or with
+/// Reads `norn export` rows on stdin and writes each one's tokens as a JSON line, or with
 /// a model, the model's probability for each class.
 fn run_features(model: Option<&Path>) -> Result<(), String> {
     use std::io::{BufRead, Write};
@@ -459,7 +455,7 @@ fn logout() -> Result<(), String> {
 }
 
 /// Reads the key from stdin: hidden when typed or pasted at a terminal, or piped in
-/// (`echo "$KEY" | jev-cc jev login`).
+/// (`echo "$KEY" | norn jev login`).
 fn read_key() -> Result<String, String> {
     use std::io::{BufRead, IsTerminal};
     let stdin = std::io::stdin();
@@ -501,7 +497,7 @@ fn install() -> Result<(), String> {
             && !existing.contains(HOOK_MARKER)
         {
             return Err(format!(
-                "{} already exists and wasn't installed by jev-cc; add `jev-cc {hook} \"$@\"` to it instead",
+                "{} already exists and wasn't installed by norn; add `norn {hook} \"$@\"` to it instead",
                 path.display()
             ));
         }
@@ -518,7 +514,7 @@ fn install() -> Result<(), String> {
 ///
 /// The first candidate is an absolute path, so hooks work from git GUIs that don't
 /// inherit the shell's PATH. When the binary running `install` is the one on PATH, that
-/// PATH entry is used (e.g. `/opt/homebrew/bin/jev-cc`) rather than `current_exe()`,
+/// PATH entry is used (e.g. `/opt/homebrew/bin/norn`) rather than `current_exe()`,
 /// which can resolve into a versioned directory that disappears on upgrade. The bare
 /// name is the last resort for when that path moves.
 fn hook_script(hook: &str, exe: &Path) -> String {
