@@ -1,3 +1,25 @@
+/// Prints a line to stdout. When the reader has gone away (`norn eval | head`), there's
+/// nobody left to tell, so norn stops quietly instead of panicking.
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if let Err(e) = writeln!(std::io::stdout(), $($arg)*) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                std::process::exit(0);
+            }
+        }
+    }};
+}
+
+/// Prints a line to stderr and ignores failure: a hook must never fail a commit because it
+/// couldn't print a message.
+macro_rules! note {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod classify;
 mod config;
 mod credentials;
@@ -102,11 +124,11 @@ fn main() -> ExitCode {
         ["jev", "login"] => command_result(login()),
         ["jev", "logout"] => command_result(logout()),
         ["--version" | "-V"] => {
-            println!("norn {}", env!("CARGO_PKG_VERSION"));
+            out!("norn {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         _ => {
-            eprint!("{USAGE}");
+            note!("{}", USAGE.trim_end());
             ExitCode::from(2)
         }
     }
@@ -116,7 +138,7 @@ fn command_result(result: Result<(), String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("norn: {e}");
+            note!("norn: {e}");
             ExitCode::FAILURE
         }
     }
@@ -125,7 +147,7 @@ fn command_result(result: Result<(), String>) -> ExitCode {
 /// Hooks never block a commit: failures are reported and the message is left alone.
 fn hook_result(result: Result<(), String>) -> ExitCode {
     if let Err(e) = result {
-        eprintln!("norn: message left unchanged ({e})");
+        note!("norn: message left unchanged ({e})");
     }
     ExitCode::SUCCESS
 }
@@ -147,7 +169,7 @@ fn command_config() -> Config {
 
 fn print_warnings(config: &Config) {
     for warning in &config.warnings {
-        eprintln!("norn: {warning}");
+        note!("norn: {warning}");
     }
 }
 
@@ -172,7 +194,7 @@ fn start_deadline(message_file: &Path, deadline_ms: u64) {
     std::thread::spawn(move || {
         std::thread::sleep(deadline);
         let _ = std::fs::remove_file(&tmp);
-        eprintln!(
+        note!(
             "norn: message left unchanged (took longer than {}ms)",
             deadline.as_millis()
         );
@@ -286,8 +308,8 @@ fn run_classify(message: &str) -> Result<(), String> {
         return Err("nothing staged".into());
     }
     let c = classify_changes(diff::Changes::Staged, &files, message, &config, None)?;
-    println!("{}{message}", c.prefix());
-    eprintln!(
+    out!("{}{message}", c.prefix());
+    note!(
         "  source: {:?}, confidence: {:.0}%, took {}ms",
         c.source,
         c.confidence * 100.0,
@@ -302,7 +324,7 @@ fn run_eval(args: &[&str]) -> Result<(), String> {
     if config.classifier.value == config::Classifier::Local
         && learn::model_path().is_some_and(|p| p.is_file())
     {
-        eprintln!(
+        note!(
             "norn: using the model learned from this repository, which has seen these commits \
              unless it was learned with `norn learn --skip N`"
         );
@@ -371,7 +393,7 @@ fn run_learn(args: &[&str]) -> Result<(), String> {
     let started = Instant::now();
     let learned = learn::run(&options, &config)?;
     print_learned(&learned);
-    eprintln!("  took {}ms", started.elapsed().as_millis());
+    note!("  took {}ms", started.elapsed().as_millis());
     Ok(())
 }
 
@@ -381,21 +403,21 @@ fn print_learned(learned: &learn::Learned) {
         .iter()
         .map(|(kind, n)| format!("{kind} {n}"))
         .collect();
-    println!(
+    out!(
         "learned from {} commits ({}), saved to {}",
         learned.commits,
         types.join(", "),
         learned.path.display()
     );
     if learned.own_labels > 0 {
-        println!(
+        out!(
             "{} of those were labelled by norn, and count for less unless you changed them",
             learned.own_labels
         );
     }
     let scoped: usize = learned.scopes.iter().map(|(_, n)| n).sum();
     if learned.scopes.is_empty() {
-        println!("this repository doesn't use scopes, so norn won't add one");
+        out!("this repository doesn't use scopes, so norn won't add one");
     } else {
         let top: Vec<&str> = learned
             .scopes
@@ -409,7 +431,7 @@ fn print_learned(learned: &learn::Learned) {
         } else {
             String::new()
         };
-        println!(
+        out!(
             "scopes: {}{more}, on {}% of commits",
             top.join(", "),
             100 * scoped / learned.scope_commits.max(1)
@@ -471,9 +493,9 @@ fn show_config() -> Result<(), String> {
         Some(p) => format!("{} (not found)", p.display()),
         None => "(none)".to_string(),
     };
-    println!("global   {}", describe(&config.global_path));
-    println!("project  {}", describe(&config.project_path));
-    println!();
+    out!("global   {}", describe(&config.global_path));
+    out!("project  {}", describe(&config.project_path));
+    out!();
 
     let rows = [
         (
@@ -513,20 +535,20 @@ fn show_config() -> Result<(), String> {
         ),
     ];
     for (key, value, source) in rows {
-        println!("{key:<20}{value:<30}  {source}");
+        out!("{key:<20}{value:<30}  {source}");
     }
     match learn::model_path().filter(|p| p.is_file()) {
         Some(path) => {
             let age = learn::commits_since_learned()
                 .map(|n| format!(", learned {n} commits ago"))
                 .unwrap_or_default();
-            println!(
+            out!(
                 "{:<20}{:<30}  norn learn",
                 "model",
                 format!("{}{age}", path.display())
             );
         }
-        None => println!(
+        None => out!(
             "{:<20}{:<30}  {}",
             "model",
             "built-in",
@@ -534,14 +556,14 @@ fn show_config() -> Result<(), String> {
         ),
     }
     if config.exclude.is_empty() {
-        println!("{:<20}{:<30}  {}", "exclude", "[]", config::Source::Default);
+        out!("{:<20}{:<30}  {}", "exclude", "[]", config::Source::Default);
     }
     for (i, pattern) in config.exclude.iter().enumerate() {
         let key = if i == 0 { "exclude" } else { "" };
-        println!("{key:<20}{:<30}  {}", pattern.value, pattern.source);
+        out!("{key:<20}{:<30}  {}", pattern.value, pattern.source);
     }
     let types: Vec<&str> = config.types.value.iter().map(|t| t.name.as_str()).collect();
-    println!(
+    out!(
         "{:<20}{:<30}  {}",
         "types",
         types.join(", "),
@@ -552,16 +574,16 @@ fn show_config() -> Result<(), String> {
             .map(|p| p.with_file_name("scopes.bin"))
             .is_some_and(|p| p.is_file());
         if learned {
-            println!("{:<20}{:<30}  norn learn", "scopes", "(learned)");
+            out!("{:<20}{:<30}  norn learn", "scopes", "(learned)");
         } else {
             let source = config::Source::Default;
-            println!("{:<20}{:<30}  {source}", "scopes", "(shared directory)");
+            out!("{:<20}{:<30}  {source}", "scopes", "(shared directory)");
         }
     }
     for (i, rule) in config.scopes.iter().enumerate() {
         let key = if i == 0 { "scopes" } else { "" };
         let mapping = format!("{} → {}", rule.prefix, rule.scope);
-        println!("{key:<20}{mapping:<30}  {}", rule.source);
+        out!("{key:<20}{mapping:<30}  {}", rule.source);
     }
     Ok(())
 }
@@ -573,9 +595,9 @@ fn login() -> Result<(), String> {
         return Err("no key entered".into());
     }
     let path = credentials::save(&dir, &key)?;
-    println!("saved API key to {}", path.display());
+    out!("saved API key to {}", path.display());
     if std::env::var_os("TYPESAFE_API_KEY").is_some_and(|v| !v.is_empty()) {
-        eprintln!("note: TYPESAFE_API_KEY is set in this shell and takes precedence");
+        note!("note: TYPESAFE_API_KEY is set in this shell and takes precedence");
     }
     Ok(())
 }
@@ -583,8 +605,8 @@ fn login() -> Result<(), String> {
 fn logout() -> Result<(), String> {
     let dir = config::dir().ok_or("couldn't find a config directory (HOME is not set)")?;
     match credentials::delete(&dir)? {
-        Some(path) => println!("removed {}", path.display()),
-        None => println!("no saved API key"),
+        Some(path) => out!("removed {}", path.display()),
+        None => out!("no saved API key"),
     }
     Ok(())
 }
@@ -592,19 +614,20 @@ fn logout() -> Result<(), String> {
 /// Reads the key from stdin: hidden when typed or pasted at a terminal, or piped in
 /// (`echo "$KEY" | norn jev login`).
 fn read_key() -> Result<String, String> {
-    use std::io::{BufRead, IsTerminal};
+    use std::io::{BufRead, IsTerminal, Write};
     let stdin = std::io::stdin();
     let interactive = stdin.is_terminal();
     if interactive {
         // Echo off before the prompt appears, so fast pastes can't be echoed.
         set_echo(false);
-        eprint!("Paste your TypeSafe API key: ");
+        let _ = write!(std::io::stderr(), "Paste your TypeSafe API key: ");
+        let _ = std::io::stderr().flush();
     }
     let mut line = String::new();
     let result = stdin.lock().read_line(&mut line);
     if interactive {
         set_echo(true);
-        eprintln!();
+        note!();
     }
     result.map_err(|e| e.to_string())?;
     Ok(line.trim().to_string())
@@ -638,14 +661,14 @@ fn install() -> Result<(), String> {
         }
         std::fs::write(&path, hook_script(hook, &exe)).map_err(|e| e.to_string())?;
         make_executable(&path)?;
-        println!("installed {}", path.display());
+        out!("installed {}", path.display());
     }
 
     let config = command_config();
     // Learned scopes are used with either classifier.
     match learn::run(&learn::Options::default(), &config) {
         Ok(learned) => print_learned(&learned),
-        Err(e) => println!("not learning from history yet: {e}"),
+        Err(e) => out!("not learning from history yet: {e}"),
     }
     Ok(())
 }

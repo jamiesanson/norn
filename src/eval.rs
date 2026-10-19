@@ -88,7 +88,7 @@ where
             options.rev
         ));
     }
-    eprintln!("norn: evaluating {} commits", commits.len());
+    note!("norn: evaluating {} commits", commits.len());
 
     let results = map_commits(&commits, |commit| {
         classify(&commit.sha, commit.message(options.with_message))
@@ -98,12 +98,12 @@ where
         write_jsonl(path, &commits, &results)?;
     }
     for (commit, result) in commits.iter().zip(&results) {
-        println!("{}", row(commit, result));
+        out!("{}", row(commit, result));
     }
-    println!();
-    print!("{}", summary(&commits, &results));
+    out!();
+    out!("{}", summary(&commits, &results).trim_end());
     if unknown_types > 0 {
-        println!("skipped {unknown_types} commits whose type isn't in the configured types");
+        out!("skipped {unknown_types} commits whose type isn't in the configured types");
     }
     Ok(())
 }
@@ -121,7 +121,7 @@ where
             options.rev
         ));
     }
-    eprintln!("norn: exporting {} commits", commits.len());
+    note!("norn: exporting {} commits", commits.len());
 
     let results = map_commits(&commits, |commit| {
         request(&commit.sha, commit.message(options.with_message))
@@ -142,22 +142,22 @@ where
             }
             Ok(None) => local += 1,
             Err(e) => {
-                eprintln!("!  {} error: {e}", &commit.sha[..7]);
+                note!("!  {} error: {e}", &commit.sha[..7]);
                 errors += 1;
             }
         }
     }
     out.flush().map_err(|e| e.to_string())?;
 
-    eprintln!("norn: wrote {written} commits");
+    note!("norn: wrote {written} commits");
     if local > 0 {
-        eprintln!("skipped {local} commits the local rules answer without a request");
+        note!("skipped {local} commits the local rules answer without a request");
     }
     if errors > 0 {
-        eprintln!("skipped {errors} commits that couldn't be read");
+        note!("skipped {errors} commits that couldn't be read");
     }
     if unknown_types > 0 {
-        eprintln!("skipped {unknown_types} commits whose type isn't in the configured types");
+        note!("skipped {unknown_types} commits whose type isn't in the configured types");
     }
     Ok(())
 }
