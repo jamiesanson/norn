@@ -426,7 +426,7 @@ mod tests {
                 (tokens, Some("frontend".to_string()))
             })
             .collect();
-        let learned = learn::scope_model(&docs);
+        let learned = learn::scope_model(&docs, &vec![1.0; docs.len()]);
         let changed = files(&["packages/web/index.ts"]);
         assert_eq!(
             choose_scope(&changed, &[], Some(&learned)).as_deref(),

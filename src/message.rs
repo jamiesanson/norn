@@ -79,6 +79,21 @@ pub fn apply_prefix(content: &str, prefix: &str) -> String {
 
 /// True when the message is nothing but a prefix this tool added, so the user
 /// never wrote a description. Clearing it lets git abort as for any empty message.
+/// `content` with `hint` as a comment line, just above git's own comments, where the editor
+/// shows it and git leaves it out of the commit.
+pub fn add_hint(content: &str, hint: &str) -> String {
+    let mut lines: Vec<&str> = content.lines().collect();
+    let line = format!("{COMMENT_CHAR} {hint}");
+    let at = lines
+        .iter()
+        .position(|l| l.starts_with(COMMENT_CHAR))
+        .unwrap_or(lines.len());
+    lines.insert(at, &line);
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
 pub fn is_bare_prefix(content: &str) -> bool {
     let body = body(content);
     !body.contains('\n') && body.ends_with(':') && is_conventional(&format!("{body} x"))
@@ -153,5 +168,17 @@ mod tests {
         assert!(should_skip("Merge branch 'main'"));
         assert!(should_skip("fixup! feat: thing"));
         assert!(!should_skip("add thing"));
+    }
+
+    #[test]
+    fn hints_go_above_gits_comments() {
+        let template = "\n# Please enter the commit message for your changes.\n#\n";
+        let hinted = add_hint(template, "norn isn't sure: fix (48%) or feat (31%)");
+        assert_eq!(
+            hinted,
+            "\n# norn isn't sure: fix (48%) or feat (31%)\n# Please enter the commit message for your changes.\n#\n"
+        );
+        assert_eq!(body(&hinted), "");
+        assert_eq!(add_hint("wip", "h"), "wip\n# h\n");
     }
 }

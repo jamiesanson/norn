@@ -5,6 +5,7 @@ mod diff;
 mod eval;
 mod features;
 mod jev;
+mod labels;
 mod lbfgs;
 mod learn;
 mod message;
@@ -39,6 +40,7 @@ USAGE:
         --out FILE     Write to FILE instead of standard output
     norn prepare-commit-msg FILE [SOURCE] [SHA]   (git hook)
     norn commit-msg FILE                          (git hook)
+    norn post-commit                              (git hook)
 
 CONFIGURATION:
     Global:  ~/.config/norn/config.toml
@@ -71,6 +73,16 @@ fn main() -> ExitCode {
                 learn::refresh_if_stale();
             }
             hook_result(result)
+        }
+        ["post-commit"] => {
+            // Never says anything: the commit is done.
+            if !config::load(std::env::current_dir().ok().as_deref())
+                .disable
+                .value
+            {
+                labels::record();
+            }
+            ExitCode::SUCCESS
         }
         ["commit-msg", file] => {
             // prepare-commit-msg already reported any config warnings for this commit.
@@ -169,6 +181,7 @@ fn start_deadline(message_file: &Path, deadline_ms: u64) {
 }
 
 fn prepare_commit_msg(file: &Path, source: Option<&str>, config: &Config) -> Result<(), String> {
+    labels::clear_pending();
     if config.disable.value {
         return Ok(());
     }
@@ -189,12 +202,16 @@ fn prepare_commit_msg(file: &Path, source: Option<&str>, config: &Config) -> Res
         return Ok(());
     }
     let classification = classify_changes(diff::Changes::Staged, &files, &body, config, None)?;
+    let flow = labels::Flow::from_source(source);
     let min_confidence = config.min_confidence.value;
     if classification.confidence < min_confidence {
+        let guesses = top_guesses(&classification);
+        if flow == labels::Flow::Editor {
+            let hint = format!("norn isn't sure: {guesses}?");
+            return write_atomic(file, &message::add_hint(&content, &hint));
+        }
         return Err(format!(
-            "best guess {} at {:.0}% confidence, below {:.0}%",
-            classification.kind,
-            classification.confidence * 100.0,
+            "not sure: {guesses}, below {:.0}% confidence",
             min_confidence * 100.0
         ));
     }
@@ -202,7 +219,35 @@ fn prepare_commit_msg(file: &Path, source: Option<&str>, config: &Config) -> Res
     write_atomic(
         file,
         &message::apply_prefix(&content, &classification.prefix()),
-    )
+    )?;
+    labels::save_pending(
+        &classification.kind,
+        classification.scope.as_deref(),
+        classification.confidence,
+        flow,
+    );
+    Ok(())
+}
+
+/// The two likeliest prefixes, such as `fix(config) (48%) or feat(config) (31%)`.
+fn top_guesses(c: &Classification) -> String {
+    let mut ranked: Vec<(&String, &f64)> = c.probabilities.iter().collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(a.1));
+    let scope = c
+        .scope
+        .as_ref()
+        .map(|s| format!("({s})"))
+        .unwrap_or_default();
+    let guesses: Vec<String> = ranked
+        .iter()
+        .take(2)
+        .map(|(kind, p)| format!("{kind}{scope} ({:.0}%)", **p * 100.0))
+        .collect();
+    if guesses.is_empty() {
+        format!("{}{scope}", c.kind)
+    } else {
+        guesses.join(" or ")
+    }
 }
 
 /// Clears a message that is only the prefix we suggested, so quitting the editor
@@ -342,6 +387,12 @@ fn print_learned(learned: &learn::Learned) {
         types.join(", "),
         learned.path.display()
     );
+    if learned.own_labels > 0 {
+        println!(
+            "{} of those were labelled by norn, and count for less unless you changed them",
+            learned.own_labels
+        );
+    }
     let scoped: usize = learned.scopes.iter().map(|(_, n)| n).sum();
     if learned.scopes.is_empty() {
         println!("this repository doesn't use scopes, so norn won't add one");
@@ -575,7 +626,7 @@ fn install() -> Result<(), String> {
     let hooks_dir = git_hooks_dir()?;
     std::fs::create_dir_all(&hooks_dir).map_err(|e| e.to_string())?;
 
-    for hook in ["prepare-commit-msg", "commit-msg"] {
+    for hook in ["prepare-commit-msg", "commit-msg", "post-commit"] {
         let path = hooks_dir.join(hook);
         if let Ok(existing) = std::fs::read_to_string(&path)
             && !existing.contains(HOOK_MARKER)

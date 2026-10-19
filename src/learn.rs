@@ -21,6 +21,7 @@ use crate::config::Config;
 use crate::diff::{self, ChangedFile, Changes};
 use crate::eval;
 use crate::features::{self, Tokens};
+use crate::labels;
 use crate::lbfgs;
 use crate::model::{self, Model};
 
@@ -48,6 +49,9 @@ const SCOPE_C: f64 = 10.0;
 const REFRESH_AFTER: usize = 50;
 /// A background learn that hasn't finished after this long is assumed to have died.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// A commit's scope tokens and its scope, if it has one.
+pub type ScopeDoc = (Vec<String>, Option<String>);
 
 pub struct Options {
     pub limit: usize,
@@ -97,6 +101,8 @@ pub struct Learned {
     pub scopes: Vec<(String, usize)>,
     /// Commits the scope model learned from, with or without a scope.
     pub scope_commits: usize,
+    /// How many of those norn labelled itself.
+    pub own_labels: usize,
     pub path: PathBuf,
 }
 
@@ -117,6 +123,8 @@ pub fn run(options: &Options, config: &Config) -> Result<Learned, String> {
         .collect();
     let commits = limit_bots(commits);
 
+    // Commits norn labelled itself count for less, unless you corrected them.
+    let label_weights = labels::weights();
     let read = eval::map_commits(&commits, |commit| {
         let changes = Changes::Commit(&commit.sha);
         let files = diff::changed_files(changes)?;
@@ -124,17 +132,26 @@ pub fn run(options: &Options, config: &Config) -> Result<Learned, String> {
         let tokens =
             classify::model_tokens(changes, &files, &exclude, message, &config.types.value)?;
         let label = commit.label();
+        let weight = label_weights.get(&commit.sha).copied().unwrap_or(1.0);
         Ok::<_, String>((
-            tokens.map(|t| (t, label.kind.to_string())),
+            tokens.map(|t| (t, label.kind.to_string(), weight)),
             (
                 features::scope_tokens(&files),
                 label.scope.map(str::to_string),
+                weight,
             ),
         ))
     });
     // Commits the local rules answer still say which scope their paths belong to.
     let (docs, scope_docs): (Vec<_>, Vec<_>) = read.into_iter().filter_map(Result::ok).unzip();
-    let docs: Vec<(Tokens, String)> = docs.into_iter().flatten().collect();
+    let (docs, weights): (Vec<(Tokens, String)>, Vec<f64>) = docs
+        .into_iter()
+        .flatten()
+        .map(|(t, kind, w)| ((t, kind), w))
+        .unzip();
+    let own_labels = scope_docs.iter().filter(|(_, _, w)| *w != 1.0).count();
+    let (scope_docs, scope_weights): (Vec<ScopeDoc>, Vec<f64>) =
+        scope_docs.into_iter().map(|(t, s, w)| ((t, s), w)).unzip();
     if docs.len() < MIN_COMMITS {
         // Recorded anyway, so the hook tries again once the history has grown.
         record_learned_at();
@@ -145,12 +162,12 @@ pub fn run(options: &Options, config: &Config) -> Result<Learned, String> {
         ));
     }
 
-    let learned = finetune(model::shared()?, &docs);
+    let learned = finetune(model::shared()?, &docs, &weights);
     let path = model_path().ok_or("not in a git repository")?;
     save(&path, &learned.to_bytes())?;
     save(
         &scope_model_path(&path),
-        &scope_model(&scope_docs).to_bytes(),
+        &scope_model(&scope_docs, &scope_weights).to_bytes(),
     )?;
     record_learned_at();
 
@@ -177,6 +194,7 @@ pub fn run(options: &Options, config: &Config) -> Result<Learned, String> {
         types,
         scopes,
         scope_commits: scope_docs.len(),
+        own_labels,
         path,
     })
 }
@@ -365,15 +383,15 @@ fn save(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
         })
 }
 
-/// `base` refitted on `docs`, each a commit's tokens and its type.
-pub fn finetune(base: &Model, docs: &[(Tokens, String)]) -> Model {
+/// `base` refitted on `docs`, each a commit's tokens and its type, counted by `weights`.
+pub fn finetune(base: &Model, docs: &[(Tokens, String)], weights: &[f64]) -> Model {
     let mut model = extend(base, docs);
     let labels: Vec<usize> = docs
         .iter()
         .map(|(_, kind)| model.classes.iter().position(|c| c == kind).unwrap())
         .collect();
     let rows: Vec<Vec<(usize, f64)>> = docs.iter().map(|(t, _)| model.vectorize(t)).collect();
-    fit(&mut model, &rows, &labels, &vec![1.0; rows.len()], C, true);
+    fit(&mut model, &rows, &labels, weights, C, true);
     model
 }
 
@@ -466,7 +484,7 @@ fn fit(
 /// A model of which scope this repository files changes under, from `docs`: each commit's
 /// scope tokens and scope, newest first. Newer commits count for more, because projects'
 /// habits drift. Scopes are the project's own, so it starts from nothing.
-pub fn scope_model(docs: &[(Vec<String>, Option<String>)]) -> Model {
+pub fn scope_model(docs: &[ScopeDoc], weights: &[f64]) -> Model {
     let label = |s: &Option<String>| s.clone().unwrap_or_else(|| NO_SCOPE.to_string());
     let mut counts: HashMap<String, usize> = HashMap::new();
     for (_, scope) in docs {
@@ -516,8 +534,10 @@ pub fn scope_model(docs: &[(Vec<String>, Option<String>)]) -> Model {
         .iter()
         .map(|(_, s)| model.classes.iter().position(|c| *c == label(s)).unwrap())
         .collect();
-    let weights: Vec<f64> = (0..docs.len())
-        .map(|i| 0.5f64.powf(i as f64 / SCOPE_HALF_LIFE))
+    let weights: Vec<f64> = weights
+        .iter()
+        .enumerate()
+        .map(|(i, w)| w * 0.5f64.powf(i as f64 / SCOPE_HALF_LIFE))
         .collect();
     fit(&mut model, &rows, &labels, &weights, SCOPE_C, false);
     model
@@ -621,7 +641,7 @@ mod tests {
             docs.push((tokens(&["m:bump"], &["dir:src"]), "deps".to_string()));
             docs.push((tokens(&["m:fix"], &["dir:src"]), "fix".to_string()));
         }
-        let learned = finetune(&tiny(), &docs);
+        let learned = finetune(&tiny(), &docs, &vec![1.0; docs.len()]);
         assert_eq!(learned.classes, ["feat", "fix", "deps"]);
         let p = learned.predict(&tokens(&["m:bump"], &["dir:src"]));
         assert!(p[2] > 0.8, "{p:?}");
@@ -635,7 +655,7 @@ mod tests {
             .map(|_| (tokens(&["m:fix"], &[]), "fix".to_string()))
             .collect();
         let base = tiny();
-        let learned = finetune(&base, &docs);
+        let learned = finetune(&base, &docs, &vec![1.0; docs.len()]);
         let add = base.blocks[0].feature("m:add").unwrap();
         let k = base.classes.len();
         assert_eq!(
@@ -681,7 +701,7 @@ mod tests {
                 ));
             }
         }
-        let model = scope_model(&docs);
+        let model = scope_model(&docs, &vec![1.0; docs.len()]);
         let scope = |path| predict_scope(&model, &[file(path)]);
         assert_eq!(
             scope("packages/runtime-core/src/hydration.ts").as_deref(),
@@ -705,7 +725,7 @@ mod tests {
                 scope,
             ));
         }
-        let model = scope_model(&docs);
+        let model = scope_model(&docs, &vec![1.0; docs.len()]);
         assert_eq!(
             predict_scope(&model, &[file("packages/editor/src/Canvas.tsx")]).as_deref(),
             Some("editor")

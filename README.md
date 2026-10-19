@@ -34,8 +34,8 @@ or build from source with `cargo install --path .`. Then, in each repository:
 norn install
 ```
 
-`install` won't overwrite existing `prepare-commit-msg` or `commit-msg` hooks; add
-`norn <hook> "$@"` to them yourself. To try norn without committing, stage some changes and
+`install` won't overwrite existing `prepare-commit-msg`, `commit-msg` or `post-commit`
+hooks; add `norn <hook> "$@"` to them yourself. To try norn without committing, stage some changes and
 run `norn classify "your message"`.
 
 ## How it works
@@ -47,7 +47,9 @@ run `norn classify "your message"`.
   project's own types and scopes, including whether it uses scopes at all. Run `norn learn`
   to refresh it.
 - Changes that only touch docs, tests or CI config get `docs`, `test` or `ci` directly.
-- If norn isn't confident, your message is left unchanged.
+- If norn isn't confident, your message is left unchanged. In the editor, it suggests its
+  two best guesses in a comment.
+- Commits norn labelled count for less when it learns, unless you changed its label.
 
 ## Configuration
 
