@@ -3,8 +3,10 @@ mod config;
 mod credentials;
 mod diff;
 mod eval;
+mod features;
 mod jev;
 mod message;
+mod model;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -17,8 +19,8 @@ const USAGE: &str = "\
 jev-cc: prefix commit messages with Conventional Commits syntax using TypeSafe's Jev
 
 USAGE:
-    jev-cc login                         Save your TypeSafe API key
-    jev-cc logout                        Remove the saved API key
+    jev-cc jev login                     Save your TypeSafe API key
+    jev-cc jev logout                    Remove the saved API key
     jev-cc install                       Install the git hooks into the current repository
     jev-cc classify [MESSAGE]            Classify the staged diff and print the prefix
     jev-cc config                        Show the settings in effect and where each comes from
@@ -26,15 +28,20 @@ USAGE:
         --limit N      Commits to evaluate (default: 50)
         --message      Send each commit's description, as `git commit -m` would
         --out FILE     Also write each result as a JSON line
+    jev-cc export [OPTIONS] [REV]        Write REV's labelled commits as training data (JSONL)
+        --limit N      Commits to export (default: all)
+        --message      Include each commit's description, as `git commit -m` would
+        --out FILE     Write to FILE instead of standard output
     jev-cc prepare-commit-msg FILE [SOURCE] [SHA]   (git hook)
     jev-cc commit-msg FILE                          (git hook)
 
 CONFIGURATION:
     Global:  ~/.config/jev-cc/config.toml
-    Project: .jev-cc.toml at the repository root (can't set base_url)
+    Project: .jev-cc.toml at the repository root (can't set classifier or base_url)
     Environment variables override both:
 
-    TYPESAFE_API_KEY             API key for Jev; overrides the key saved by `jev-cc login`
+    JEV_CC_CLASSIFIER            `local` for the built-in model, or `jev` (default: local)
+    TYPESAFE_API_KEY             API key for Jev; overrides the key saved by `jev-cc jev login`
     JEV_CC_BASE_URL              API base URL (default: https://api.typesafe.ai)
     JEV_CC_TIMEOUT_MS            Request timeout; the message is left as-is on timeout (default: 1000)
     JEV_CC_DEADLINE_MS           Time limit for the whole hook (default: 2000)
@@ -73,9 +80,13 @@ fn main() -> ExitCode {
         ["classify", message @ ..] => command_result(run_classify(&message.join(" "))),
         ["config"] => command_result(show_config()),
         ["eval", rest @ ..] => command_result(run_eval(rest)),
+        ["export", rest @ ..] => command_result(run_export(rest)),
+        // For `training/train_linear.py`; not in USAGE.
+        ["features"] => command_result(run_features(None)),
+        ["features", "--model", path] => command_result(run_features(Some(Path::new(path)))),
         ["install"] => command_result(install()),
-        ["login"] => command_result(login()),
-        ["logout"] => command_result(logout()),
+        ["jev", "login"] => command_result(login()),
+        ["jev", "logout"] => command_result(logout()),
         ["--version" | "-V"] => {
             println!("jev-cc {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -239,7 +250,7 @@ fn run_classify(message: &str) -> Result<(), String> {
 }
 
 fn run_eval(args: &[&str]) -> Result<(), String> {
-    let options = eval::Options::parse(args)?;
+    let options = eval::Options::parse(args, 50)?;
     let config = command_config();
     let types: Vec<String> = config.types.value.iter().map(|t| t.name.clone()).collect();
     // Hook timeouts are tuned for commit latency; replaying history can wait longer.
@@ -248,6 +259,69 @@ fn run_eval(args: &[&str]) -> Result<(), String> {
         let changes = diff::Changes::Commit(sha);
         let files = diff::changed_files(changes)?;
         classify_changes(changes, &files, message, &config, timeout)
+    })
+}
+
+/// Reads `jev-cc export` rows on stdin and writes each one's tokens as a JSON line, or with
+/// a model, the model's probability for each class.
+fn run_features(model: Option<&Path>) -> Result<(), String> {
+    use std::io::{BufRead, Write};
+    let model = model
+        .map(|path| {
+            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            model::Model::from_bytes(&bytes)
+        })
+        .transpose()?;
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for (n, line) in std::io::stdin().lock().lines().enumerate() {
+        let line = line.map_err(|e| e.to_string())?;
+        if line.is_empty() {
+            continue;
+        }
+        let row: serde_json::Value =
+            serde_json::from_str(&line).map_err(|e| format!("line {}: {e}", n + 1))?;
+        let state = &row["state"];
+        let files: Vec<diff::ChangedFile> = state["files"]
+            .as_array()
+            .ok_or(format!("line {}: no state.files", n + 1))?
+            .iter()
+            .filter_map(|f| {
+                let (status, path) = f.as_str()?.split_once(' ')?;
+                Some(diff::ChangedFile {
+                    status: status.chars().next()?,
+                    path: path.to_string(),
+                })
+            })
+            .collect();
+        let tokens = features::tokens(
+            &files,
+            state["patch"].as_str().unwrap_or_default(),
+            state["message"].as_str().unwrap_or_default(),
+        );
+        let value = match &model {
+            Some(model) => serde_json::Value::from_iter(
+                model.classes.iter().cloned().zip(model.predict(&tokens)),
+            ),
+            None => serde_json::to_value(&tokens).map_err(|e| e.to_string())?,
+        };
+        writeln!(out, "{value}").map_err(|e| e.to_string())?;
+    }
+    out.flush().map_err(|e| e.to_string())
+}
+
+fn run_export(args: &[&str]) -> Result<(), String> {
+    let options = eval::Options::parse(args, usize::MAX)?;
+    let config = command_config();
+    let types: Vec<String> = config.types.value.iter().map(|t| t.name.clone()).collect();
+    let exclude: Vec<String> = config.exclude.iter().map(|s| s.value.clone()).collect();
+    eval::export(&options, &types, |sha, message| {
+        let changes = diff::Changes::Commit(sha);
+        let files = diff::changed_files(changes)?;
+        let request =
+            classify::request_for(changes, &files, &exclude, message, &config.types.value)?;
+        request
+            .map(|r| serde_json::to_value(r).map_err(|e| e.to_string()))
+            .transpose()
     })
 }
 
@@ -267,6 +341,7 @@ fn classify_changes(
         breaking_threshold: config.breaking_threshold.value,
         types: &config.types.value,
         scopes: &config.scopes,
+        classifier: config.classifier.value,
     };
     let exclude: Vec<String> = config.exclude.iter().map(|s| s.value.clone()).collect();
     classify::classify(
@@ -295,6 +370,11 @@ fn show_config() -> Result<(), String> {
             "disable",
             config.disable.value.to_string(),
             config.disable.source,
+        ),
+        (
+            "classifier",
+            config.classifier.value.to_string(),
+            config.classifier.source,
         ),
         (
             "base_url",
@@ -379,7 +459,7 @@ fn logout() -> Result<(), String> {
 }
 
 /// Reads the key from stdin: hidden when typed or pasted at a terminal, or piped in
-/// (`echo "$KEY" | jev-cc login`).
+/// (`echo "$KEY" | jev-cc jev login`).
 fn read_key() -> Result<String, String> {
     use std::io::{BufRead, IsTerminal};
     let stdin = std::io::stdin();

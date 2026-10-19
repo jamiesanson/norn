@@ -1,8 +1,8 @@
 # jev-conventional-commits
 
 A fast git hook that classifies your staged diff and prefixes your commit message with
-[Conventional Commits](https://www.conventionalcommits.org/) syntax, using
-[TypeSafe's Jev](https://docs.typesafe.ai/api) model.
+[Conventional Commits](https://www.conventionalcommits.org/) syntax. It runs on your machine,
+or can use [TypeSafe's Jev](https://docs.typesafe.ai/api) model.
 
 ```console
 $ git commit -m "handle empty config files"
@@ -12,15 +12,15 @@ fix(config): handle empty config files
 
 ## How it works
 
-Jev doesn't write text. It picks an answer from a set you define up front and says how
-confident it is. That suits this tool:
-
 - **You** write the description.
-- **Jev** picks the `type` (`feat`, `fix`, `docs`, …) and whether the change is breaking (`!`).
-- **Local rules** pick the `scope` from the paths you changed, and skip the model call
-  when the answer is obvious (for example, a docs-only diff).
+- **A classifier** picks the `type` (`feat`, `fix`, `docs`, …). By default it's a small model
+  built into jev-cc, trained on public conventional-commit history. With Jev instead, the
+  type is more accurate, and Jev also decides whether the change is breaking (`!`).
+- **Local rules** pick the `scope` from the paths you changed, and skip the classifier when
+  the answer is obvious (for example, a docs-only diff).
 
-If the model isn't confident enough, or can't be reached, your message is left unchanged.
+If the classifier isn't confident enough, or Jev can't be reached, your message is left
+unchanged.
 
 ## Install
 
@@ -40,12 +40,14 @@ Prebuilt archives for each platform are also on the
 [releases page](https://github.com/jamiesanson/jev-conventional-commits/releases). To build from
 source, run `cargo install --path .`.
 
-Then:
+Then, in each repository:
 
 ```sh
-jev-cc login     # once: paste your TypeSafe API key
-jev-cc install   # in each repository
+jev-cc install
 ```
+
+To use Jev, set `classifier = "jev"` (see [Configuration](#configuration)) and run
+`jev-cc jev login` once to save your TypeSafe API key.
 
 With `git commit -m`, the prefix goes in front of your message. With the editor, the first
 line is pre-filled (e.g. `fix(config): `) for you to finish.
@@ -59,7 +61,7 @@ Try it without committing:
 $ git add -p
 $ jev-cc classify "handle empty config files"
 fix(config): handle empty config files
-  source: Jev, confidence: 87%, took 180ms
+  source: Model, confidence: 97%, took 37ms
 ```
 
 ## Configuration
@@ -89,6 +91,7 @@ types = ["feat", "fix", "docs", "refactor", "test", "chore"]
 | `min_confidence` | `JEV_CC_MIN_CONFIDENCE` | `0.6` | Minimum confidence to apply a type |
 | `breaking_threshold` | `JEV_CC_BREAKING_THRESHOLD` | `0.85` | Probability needed to add `!` |
 | `disable` | `JEV_CC_DISABLE` | `false` | |
+| `classifier` | `JEV_CC_CLASSIFIER` | `local` | `local` for the built-in model, or `jev`. Global config only |
 | `exclude` | | `[]` | Paths never sent to Jev |
 | `types` | | all built-in types | Types jev-cc may choose from |
 | `scopes` | | | Path prefixes mapped to scopes |
@@ -116,10 +119,12 @@ Type names must be lowercase letters. A project's `types` replace your global on
 the same path.
 
 `base_url` can't be set in `.jev-cc.toml`, so a repository you clone can't send your diffs
-and API key somewhere else.
+and API key somewhere else. Nor can `classifier`.
+
+The built-in model only chooses from the built-in types, and never marks a change breaking.
 
 Run `jev-cc config` to see the settings in effect and where each one comes from.
-`TYPESAFE_API_KEY` overrides the key saved by `jev-cc login`.
+`TYPESAFE_API_KEY` overrides the key saved by `jev-cc jev login`.
 
 ## Classification
 
@@ -128,8 +133,9 @@ Run `jev-cc config` to see the settings in effect and where each one comes from.
 2. **Local rules.** If every changed file is documentation, a test or CI config, the type is
    `docs`, `test` or `ci`, and no request is made. This only applies when that type is in
    `types`.
-3. **Jev.** Otherwise, one request asks two questions about the changed file list, a trimmed
-   patch (lockfiles and binaries omitted, about 24 KB at most) and your message:
+3. **Classifier.** Otherwise, the classifier reads the changed file list, a trimmed patch
+   (lockfiles and binaries omitted, about 24 KB at most) and your message. Jev is asked two
+   questions:
    - `type`: a choice between your `types`, or by default `feat`, `fix`, `docs`, `style`,
      `refactor`, `perf`, `test`, `build`, `ci`, `chore` and `revert`
    - `breaking`: yes or no
@@ -142,8 +148,10 @@ Run `jev-cc config` to see the settings in effect and where each one comes from.
 
 ## Privacy
 
-When the local rules can't decide, jev-cc sends the following to TypeSafe
-(`api.typesafe.ai`, or your `base_url`):
+With the built-in model, nothing leaves your machine.
+
+With `classifier = "jev"`, when the local rules can't decide, jev-cc sends the following to
+TypeSafe (`api.typesafe.ai`, or your `base_url`):
 
 - the paths of your staged files, except those matched by `exclude`
 - the patch for those files, trimmed to about 24 KB, with lockfile and binary contents left
@@ -155,7 +163,7 @@ tests or CI config aren't sent anywhere.
 
 Any secrets in your staged changes are sent along with the patch. Keep sensitive paths out
 with `exclude`, catch secrets elsewhere with a secret scanner in a `pre-commit` hook, and
-don't install jev-cc in repositories whose code can't leave your machine.
+don't use Jev in repositories whose code can't leave your machine.
 
 ## Development
 
@@ -172,6 +180,9 @@ sends each commit's description, as `git commit -m` would, and `--out FILE` writ
 answer with Jev's probabilities as JSON lines. Set `types` in that repository's
 `.jev-cc.toml` to match its conventions first; many projects label dependency and CI
 updates `chore`, which the default types would call `build` and `ci`.
+
+`jev-cc export` writes the same commits as training data for a local model; see
+[`training/`](training/README.md).
 
 ### Releasing
 

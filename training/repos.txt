@@ -1,0 +1,64 @@
+# Repositories whose human commits almost all use Conventional Commits prefixes,
+# screened in October 2026. One `owner/name` per line.
+
+[train]
+# TypeScript / JavaScript
+angular/angular
+angular/angular-cli
+angular/components
+vitejs/vite
+vitest-dev/vitest
+nuxt/nuxt
+nestjs/nest
+typeorm/typeorm
+pnpm/pnpm
+ionic-team/ionic-framework
+eslint/eslint
+unocss/unocss
+vueuse/vueuse
+electron/electron
+aws/aws-cdk
+n8n-io/n8n
+immich-app/immich
+nrwl/nx
+renovatebot/renovate
+open-telemetry/opentelemetry-js
+TanStack/query
+TanStack/router
+trpc/trpc
+payloadcms/payload
+honojs/hono
+QwikDev/qwik
+fastify/fastify
+projen/projen
+videojs/video.js
+# Rust
+tauri-apps/tauri
+denoland/deno
+biomejs/biome
+oxc-project/oxc
+rolldown/rolldown
+web-infra-dev/rspack
+starship/starship
+orhun/git-cliff
+pola-rs/polars
+# Go
+argoproj/argo-cd
+argoproj/argo-workflows
+coder/coder
+flipt-io/flipt
+kyverno/kyverno
+open-feature/flagd
+# Python
+apache/superset
+commitizen-tools/commitizen
+python-semantic-release/python-semantic-release
+lancedb/lancedb
+
+[heldout]
+# The repositories jev-cc's earlier evals used, plus two more, never trained on.
+vuejs/core
+goreleaser/goreleaser
+release-plz/release-plz
+excalidraw/excalidraw
+ratatui/ratatui

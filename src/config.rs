@@ -6,8 +6,8 @@
 //! 4. `JEV_CC_*` environment variables
 //!
 //! The project file comes with whatever repository you clone, so it can't set anything
-//! that changes where your diffs and API key are sent (`base_url`), and its `exclude`
-//! patterns add to the global ones rather than replacing them.
+//! that changes where your diffs and API key are sent (`base_url`, `classifier`), and its
+//! `exclude` patterns add to the global ones rather than replacing them.
 //!
 //! `types` is a whole set, so the project's list replaces the global one. `scopes` entries
 //! combine, with the project winning on the same prefix.
@@ -95,6 +95,25 @@ pub struct ScopeRule {
     pub source: Source,
 }
 
+/// What picks the type when the local rules can't.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Classifier {
+    /// TypeSafe's Jev, over the network.
+    Jev,
+    /// The model built into jev-cc. Nothing leaves your machine.
+    Local,
+}
+
+impl Display for Classifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Classifier::Jev => write!(f, "jev"),
+            Classifier::Local => write!(f, "local"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Setting<T> {
     pub value: T,
@@ -104,6 +123,7 @@ pub struct Setting<T> {
 #[derive(Debug)]
 pub struct Config {
     pub disable: Setting<bool>,
+    pub classifier: Setting<Classifier>,
     pub base_url: Setting<String>,
     pub timeout_ms: Setting<u64>,
     pub deadline_ms: Setting<u64>,
@@ -124,6 +144,7 @@ pub struct Config {
 #[derive(Debug, Default, Deserialize)]
 struct File {
     disable: Option<bool>,
+    classifier: Option<Classifier>,
     base_url: Option<String>,
     timeout_ms: Option<u64>,
     deadline_ms: Option<u64>,
@@ -200,6 +221,11 @@ fn resolve(
             "ignoring `base_url` in {PROJECT_FILE}: it can only be set in the global config"
         ));
     }
+    if project.classifier.take().is_some() {
+        warnings.push(format!(
+            "ignoring `classifier` in {PROJECT_FILE}: it can only be set in the global config"
+        ));
+    }
 
     let mut w = |msg: String| warnings.push(msg);
     let disable = layer(
@@ -207,6 +233,14 @@ fn resolve(
         global.disable,
         project.disable,
         "JEV_CC_DISABLE",
+        env,
+        &mut w,
+    );
+    let classifier = layer(
+        Classifier::Local,
+        global.classifier,
+        None,
+        "JEV_CC_CLASSIFIER",
         env,
         &mut w,
     );
@@ -305,6 +339,7 @@ fn resolve(
 
     Config {
         disable,
+        classifier,
         base_url,
         timeout_ms,
         deadline_ms,
@@ -467,6 +502,16 @@ macro_rules! env_value_from_str {
 }
 env_value_from_str!(u64, f64, String);
 
+impl EnvValue for Classifier {
+    fn parse_env(raw: &str) -> Option<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "jev" => Some(Classifier::Jev),
+            "local" => Some(Classifier::Local),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,6 +585,25 @@ mod tests {
         let env = |name: &str| (name == "JEV_CC_BASE_URL").then(|| "http://localhost:1".into());
         let c = resolve(None, None, &env, vec![]);
         assert_eq!(c.base_url.source, Source::Env("JEV_CC_BASE_URL"));
+    }
+
+    #[test]
+    fn classifier_is_global_or_env_only() {
+        let c = resolve(None, None, &no_env, vec![]);
+        assert_eq!(c.classifier.value, Classifier::Local);
+        let global = file("classifier = \"jev\"");
+        let c = resolve(Some(global), None, &no_env, vec![]);
+        assert_eq!(c.classifier.value, Classifier::Jev);
+
+        let project = file("classifier = \"jev\"");
+        let c = resolve(None, Some(project), &no_env, vec![]);
+        assert_eq!(c.classifier.value, Classifier::Local);
+        assert!(c.warnings[0].contains("classifier"));
+
+        let env = |name: &str| (name == "JEV_CC_CLASSIFIER").then(|| "Jev".to_string());
+        let c = resolve(None, None, &env, vec![]);
+        assert_eq!(c.classifier.value, Classifier::Jev);
+        assert_eq!(c.classifier.source, Source::Env("JEV_CC_CLASSIFIER"));
     }
 
     #[test]

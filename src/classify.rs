@@ -1,12 +1,14 @@
 //! Decides the conventional commit type, scope and breaking flag for a staged diff.
 //!
-//! Local rules answer obvious cases for free. Everything else is a single Jev call.
+//! Local rules answer obvious cases for free. Everything else goes to the classifier: one
+//! Jev call, or the model built into jev-cc.
 
 use std::collections::BTreeMap;
 
-use crate::config::{ScopeRule, TypeDef};
+use crate::config::{Classifier, ScopeRule, TypeDef};
 use crate::diff::{self, ChangedFile, Changes, Outgoing};
 use crate::jev::{self, Answer, NoulCriteria, Question};
+use crate::{features, model};
 
 const TYPE_INSTRUCTIONS: &str =
     "Which Conventional Commits type best describes the primary purpose of this staged change?";
@@ -16,8 +18,11 @@ const BREAKING_INSTRUCTIONS: &str = "Does this change break backwards compatibil
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    Local,
+    /// The path rules (docs, tests or CI only).
+    Rules,
     Jev,
+    /// The model built into jev-cc.
+    Model,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,9 +31,9 @@ pub struct Classification {
     pub scope: Option<String>,
     pub breaking: bool,
     pub confidence: f64,
-    /// Jev's probability for every allowed type. Empty for local answers.
+    /// The classifier's probability for every allowed type. Empty for rule answers.
     pub probabilities: BTreeMap<String, f64>,
-    /// Jev's probability that the change is breaking. `None` for local answers.
+    /// Jev's probability that the change is breaking. `None` when Jev didn't answer.
     pub breaking_probability: Option<f64>,
     pub source: Source,
 }
@@ -53,6 +58,7 @@ pub struct Settings<'a> {
     pub types: &'a [TypeDef],
     /// When non-empty, replaces the shared-directory guess for the scope.
     pub scopes: &'a [ScopeRule],
+    pub classifier: Classifier,
 }
 
 pub fn classify(
@@ -73,18 +79,18 @@ pub fn classify(
             confidence: 1.0,
             probabilities: BTreeMap::new(),
             breaking_probability: None,
-            source: Source::Local,
+            source: Source::Rules,
         });
     }
 
-    let client = client.ok_or_else(|| jev::Error::MissingApiKey.to_string())?;
-    let outgoing = diff::outgoing(changes, files, exclude)?;
-    if outgoing.files.is_empty() {
-        return Err("every changed file is excluded".into());
+    if settings.classifier == Classifier::Local {
+        let outgoing = outgoing_for(changes, files, exclude)?;
+        return local_model(&outgoing, message, settings.types, scope);
     }
-    let mut response = client
-        .system_one(&request(&outgoing, message, settings.types))
-        .map_err(|e| e.to_string())?;
+
+    let client = client.ok_or_else(|| jev::Error::MissingApiKey.to_string())?;
+    let request = model_request(changes, files, exclude, message, settings.types)?;
+    let mut response = client.system_one(&request).map_err(|e| e.to_string())?;
 
     let (kind, confidence, probabilities) = match response.answers.remove("type") {
         Some(Answer::Choice {
@@ -114,6 +120,96 @@ pub fn classify(
         breaking_probability,
         source: Source::Jev,
     })
+}
+
+/// The request `classify` would send, or `None` when the local rules answer without one.
+/// `jev-cc export` writes these as training data, so a model learns from what it will see.
+pub fn request_for<'a>(
+    changes: Changes,
+    files: &[ChangedFile],
+    exclude: &[String],
+    message: &str,
+    types: &'a [TypeDef],
+) -> Result<Option<jev::Request<'a>>, String> {
+    if local_type(files, types).is_some() {
+        return Ok(None);
+    }
+    model_request(changes, files, exclude, message, types).map(Some)
+}
+
+fn model_request<'a>(
+    changes: Changes,
+    files: &[ChangedFile],
+    exclude: &[String],
+    message: &str,
+    types: &'a [TypeDef],
+) -> Result<jev::Request<'a>, String> {
+    let outgoing = outgoing_for(changes, files, exclude)?;
+    Ok(request(&outgoing, message, types))
+}
+
+/// What either classifier sees: the files and trimmed patch, without excluded paths.
+fn outgoing_for(
+    changes: Changes,
+    files: &[ChangedFile],
+    exclude: &[String],
+) -> Result<Outgoing, String> {
+    let outgoing = diff::outgoing(changes, files, exclude)?;
+    if outgoing.files.is_empty() {
+        return Err("every changed file is excluded".into());
+    }
+    Ok(outgoing)
+}
+
+/// Picks among the allowed types the model knows, with probabilities renormalised over
+/// them, and confidence computed as Jev computes it, so `min_confidence` means the same.
+fn local_model(
+    outgoing: &Outgoing,
+    message: &str,
+    types: &[TypeDef],
+    scope: Option<String>,
+) -> Result<Classification, String> {
+    let model = model::shared()?;
+    let p = model.predict(&features::tokens(&outgoing.files, &outgoing.patch, message));
+    let allowed: Vec<(&str, f64)> = model
+        .classes
+        .iter()
+        .zip(p)
+        .filter(|(class, _)| types.iter().any(|t| &t.name == *class))
+        .map(|(class, p)| (class.as_str(), p))
+        .collect();
+    if allowed.is_empty() {
+        return Err("the built-in model doesn't know any of the configured types".into());
+    }
+    let total: f64 = allowed.iter().map(|(_, p)| p).sum();
+    let probabilities: BTreeMap<String, f64> = allowed
+        .iter()
+        .map(|(class, p)| (class.to_string(), p / total))
+        .collect();
+    let (kind, best) = probabilities
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(k, p)| (k.clone(), *p))
+        .expect("allowed isn't empty");
+    Ok(Classification {
+        kind,
+        scope,
+        breaking: false,
+        confidence: jev_confidence(best, probabilities.len()),
+        probabilities,
+        breaking_probability: None,
+        source: Source::Model,
+    })
+}
+
+/// Jev's confidence for a choice: how far the top probability is above uniform, scaled to
+/// 0..1.
+fn jev_confidence(top: f64, options: usize) -> f64 {
+    if options < 2 {
+        return 1.0;
+    }
+    let uniform = 1.0 / options as f64;
+    (top - uniform) / (1.0 - uniform)
 }
 
 fn request<'a>(outgoing: &Outgoing, message: &str, types: &'a [TypeDef]) -> jev::Request<'a> {

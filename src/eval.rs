@@ -1,5 +1,8 @@
 //! `jev-cc eval`: replays commits that already have conventional prefixes and compares
 //! what jev-cc would have chosen with what the author wrote.
+//!
+//! `jev-cc export`: writes the same commits as labelled training data, one request per
+//! line with the author's answers, in the JSONL format `laya-train` reads.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -15,6 +18,7 @@ use crate::message;
 const WORKERS: usize = 8;
 
 pub struct Options {
+    /// `usize::MAX` for every commit.
     pub limit: usize,
     /// Send each commit's description, as a user committing with `-m` would.
     pub with_message: bool,
@@ -24,9 +28,9 @@ pub struct Options {
 }
 
 impl Options {
-    pub fn parse(args: &[&str]) -> Result<Options, String> {
+    pub fn parse(args: &[&str], default_limit: usize) -> Result<Options, String> {
         let mut options = Options {
-            limit: 50,
+            limit: default_limit,
             with_message: false,
             out: None,
             rev: "HEAD".into(),
@@ -59,6 +63,15 @@ impl Labelled {
     fn label(&self) -> message::Prefix<'_> {
         message::parse_prefix(&self.subject).expect("only labelled commits are kept")
     }
+
+    /// The description, as `git commit -m` would send it, or nothing for the editor flow.
+    fn message(&self, with_message: bool) -> &str {
+        if with_message {
+            self.label().description
+        } else {
+            ""
+        }
+    }
 }
 
 /// `classify` answers for one commit: its sha and the message to send.
@@ -75,29 +88,9 @@ where
     }
     eprintln!("jev-cc: evaluating {} commits", commits.len());
 
-    let results: Vec<Mutex<Option<Result<Classification, String>>>> =
-        commits.iter().map(|_| Mutex::new(None)).collect();
-    let next = AtomicUsize::new(0);
-    std::thread::scope(|s| {
-        for _ in 0..WORKERS.min(commits.len()) {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(commit) = commits.get(i) else { break };
-                    let message = if options.with_message {
-                        commit.label().description
-                    } else {
-                        ""
-                    };
-                    *results[i].lock().unwrap() = Some(classify(&commit.sha, message));
-                }
-            });
-        }
+    let results = map_commits(&commits, |commit| {
+        classify(&commit.sha, commit.message(options.with_message))
     });
-    let results: Vec<Result<Classification, String>> = results
-        .into_iter()
-        .map(|r| r.into_inner().unwrap().expect("every commit is classified"))
-        .collect();
 
     if let Some(path) = &options.out {
         write_jsonl(path, &commits, &results)?;
@@ -111,6 +104,99 @@ where
         println!("skipped {unknown_types} commits whose type isn't in the configured types");
     }
     Ok(())
+}
+
+/// `request` gives the request jev-cc would send for one commit (its sha and the message
+/// to send), or `None` when the local rules would answer without one.
+pub fn export<F>(options: &Options, types: &[String], request: F) -> Result<(), String>
+where
+    F: Fn(&str, &str) -> Result<Option<serde_json::Value>, String> + Sync,
+{
+    let (commits, unknown_types) = labelled_commits(&options.rev, options.limit, types)?;
+    if commits.is_empty() {
+        return Err(format!(
+            "no commits with conventional prefixes in {}",
+            options.rev
+        ));
+    }
+    eprintln!("jev-cc: exporting {} commits", commits.len());
+
+    let results = map_commits(&commits, |commit| {
+        request(&commit.sha, commit.message(options.with_message))
+    });
+
+    let mut out: Box<dyn Write> = match &options.out {
+        Some(path) => Box::new(std::io::BufWriter::new(
+            std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?,
+        )),
+        None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
+    };
+    let (mut written, mut local, mut errors) = (0, 0, 0);
+    for (commit, result) in commits.iter().zip(results) {
+        match result {
+            Ok(Some(request)) => {
+                writeln!(out, "{}", training_row(commit, request)).map_err(|e| e.to_string())?;
+                written += 1;
+            }
+            Ok(None) => local += 1,
+            Err(e) => {
+                eprintln!("!  {} error: {e}", &commit.sha[..7]);
+                errors += 1;
+            }
+        }
+    }
+    out.flush().map_err(|e| e.to_string())?;
+
+    eprintln!("jev-cc: wrote {written} commits");
+    if local > 0 {
+        eprintln!("skipped {local} commits the local rules answer without a request");
+    }
+    if errors > 0 {
+        eprintln!("skipped {errors} commits that couldn't be read");
+    }
+    if unknown_types > 0 {
+        eprintln!("skipped {unknown_types} commits whose type isn't in the configured types");
+    }
+    Ok(())
+}
+
+/// `{state, questions, expected}`: the request's own state and questions, so training sees
+/// exactly what the model is asked, and the author's answers. `sha` and `subject` are for
+/// tracing a row back to its commit.
+fn training_row(commit: &Labelled, request: serde_json::Value) -> serde_json::Value {
+    let label = commit.label();
+    serde_json::json!({
+        "sha": commit.sha,
+        "subject": commit.subject,
+        "state": request["state"],
+        "questions": request["questions"],
+        "expected": { "type": label.kind, "breaking": label.breaking },
+    })
+}
+
+/// Runs `f` over every commit, `WORKERS` at a time, keeping the commits' order.
+fn map_commits<T, F>(commits: &[Labelled], f: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(&Labelled) -> T + Sync,
+{
+    let results: Vec<Mutex<Option<T>>> = commits.iter().map(|_| Mutex::new(None)).collect();
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..WORKERS.min(commits.len()) {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(commit) = commits.get(i) else { break };
+                    *results[i].lock().unwrap() = Some(f(commit));
+                }
+            });
+        }
+    });
+    results
+        .into_iter()
+        .map(|r| r.into_inner().unwrap().expect("every commit is mapped"))
+        .collect()
 }
 
 /// Non-merge, non-root commits in `rev` whose subject has a prefix with an allowed type,
@@ -167,8 +253,8 @@ fn row(commit: &Labelled, result: &Result<Classification, String>) -> String {
         Ok(c) => {
             let mark = if c.kind == label.kind { "✓" } else { "✗" };
             let how = match c.source {
-                Source::Local => "local".to_string(),
-                Source::Jev => format!("{:>3.0}%", c.confidence * 100.0),
+                Source::Rules => "rules".to_string(),
+                Source::Jev | Source::Model => format!("{:>3.0}%", c.confidence * 100.0),
             };
             let runner_up = runner_up(c)
                 .map(|(kind, p)| format!(" ({kind} {p:.2})"))
@@ -213,15 +299,6 @@ fn summary(commits: &[Labelled], results: &[Result<Classification, String>]) -> 
     let errors = results.len() - answered.len();
     let correct = |c: &(message::Prefix, &Classification)| c.0.kind == c.1.kind;
 
-    let local: Vec<_> = answered
-        .iter()
-        .filter(|a| a.1.source == Source::Local)
-        .collect();
-    let jev: Vec<_> = answered
-        .iter()
-        .filter(|a| a.1.source == Source::Jev)
-        .collect();
-
     line(format!("commits     {}", commits.len()));
     if errors > 0 {
         line(format!("errors      {errors}"));
@@ -233,14 +310,19 @@ fn summary(commits: &[Labelled], results: &[Result<Classification, String>]) -> 
             answered.len()
         )
     ));
-    line(format!(
-        "  local     {} correct",
-        pct(local.iter().filter(|a| correct(a)).count(), local.len())
-    ));
-    line(format!(
-        "  jev       {} correct",
-        pct(jev.iter().filter(|a| correct(a)).count(), jev.len())
-    ));
+    for (source, name) in [
+        (Source::Rules, "rules"),
+        (Source::Jev, "jev"),
+        (Source::Model, "model"),
+    ] {
+        let by: Vec<_> = answered.iter().filter(|a| a.1.source == source).collect();
+        if !by.is_empty() || source == Source::Rules {
+            line(format!(
+                "  {name:<9} {} correct",
+                pct(by.iter().filter(|a| correct(a)).count(), by.len())
+            ));
+        }
+    }
 
     let expected_breaking = answered.iter().filter(|a| a.0.breaking).count();
     let predicted_breaking = answered.iter().filter(|a| a.1.breaking).count();
@@ -316,12 +398,34 @@ mod tests {
 
     #[test]
     fn parses_options() {
-        let o = Options::parse(&["--limit", "20", "--message", "main~10"]).unwrap();
+        let o = Options::parse(&["--limit", "20", "--message", "main~10"], 50).unwrap();
         assert_eq!(o.limit, 20);
         assert!(o.with_message);
         assert_eq!(o.rev, "main~10");
-        assert!(Options::parse(&["--limit"]).is_err());
-        assert!(Options::parse(&["--nope"]).is_err());
+        assert_eq!(Options::parse(&[], usize::MAX).unwrap().limit, usize::MAX);
+        assert!(Options::parse(&["--limit"], 50).is_err());
+        assert!(Options::parse(&["--nope"], 50).is_err());
+    }
+
+    #[test]
+    fn training_row_keeps_the_request_and_adds_the_label() {
+        let commit = Labelled {
+            sha: "abc1234".into(),
+            subject: "fix(config)!: handle empty files".into(),
+        };
+        let request = serde_json::json!({
+            "model": "jev-latest",
+            "state": { "files": ["M src/config.rs"], "patch": "..." },
+            "questions": { "type": { "type": "choice" } },
+        });
+        let row = training_row(&commit, request);
+        assert_eq!(row["state"]["files"][0], "M src/config.rs");
+        assert_eq!(row["questions"]["type"]["type"], "choice");
+        assert_eq!(
+            row["expected"],
+            serde_json::json!({ "type": "fix", "breaking": true })
+        );
+        assert!(row.get("model").is_none());
     }
 
     #[test]
