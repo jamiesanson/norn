@@ -1,6 +1,6 @@
 [package]
 name = "norn"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Prefixes commit messages with Conventional Commits types, decided locally or by TypeSafe's Jev"
 repository = "https://github.com/jamiesanson/norn"
