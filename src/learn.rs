@@ -21,6 +21,7 @@ use crate::config::Config;
 use crate::diff::{self, ChangedFile, Changes};
 use crate::eval;
 use crate::features::{self, Tokens};
+use crate::git;
 use crate::labels;
 use crate::lbfgs;
 use crate::model::{self, Model};
@@ -44,8 +45,8 @@ const NO_SCOPE: &str = "(none)";
 /// A commit this many commits older counts half as much towards the scope model.
 const SCOPE_HALF_LIFE: f64 = 100.0;
 const SCOPE_C: f64 = 10.0;
-/// The hook re-learns in the background once this many commits have landed since the last
-/// time, so the models keep up as a project's habits drift.
+/// The hook re-learns in the background once this many commits have been made here since
+/// the last time, so the models keep up as a project's habits drift.
 const REFRESH_AFTER: usize = 50;
 /// A background learn that hasn't finished after this long is assumed to have died.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(600);
@@ -132,7 +133,8 @@ pub fn run(options: &Options, config: &Config) -> Result<Learned, String> {
         let tokens =
             classify::model_tokens(changes, &files, &exclude, message, &config.types.value)?;
         let label = commit.label();
-        let weight = label_weights.get(&commit.sha).copied().unwrap_or(1.0);
+        let key = (commit.parent.clone(), commit.subject.trim_end().to_string());
+        let weight = label_weights.get(&key).copied().unwrap_or(1.0);
         Ok::<_, String>((
             tokens.map(|t| (t, label.kind.to_string(), weight)),
             (
@@ -239,28 +241,12 @@ fn with_message(sha: &str) -> bool {
 
 /// Where the learned model lives: in the git directory, shared by every worktree.
 pub fn model_path() -> Option<PathBuf> {
-    // Asked several times per commit, and the answer can't change while norn runs.
-    static GIT_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
-    let git_dir =
-        GIT_DIR.get_or_init(|| git_output(&["rev-parse", "--git-common-dir"]).map(PathBuf::from));
-    Some(git_dir.as_ref()?.join("norn").join("model.bin"))
+    Some(git::common_dir()?.join("norn").join("model.bin"))
 }
 
 /// norn's directory inside the repository's git directory.
 fn norn_dir() -> Option<PathBuf> {
     model_path()?.parent().map(Path::to_path_buf)
-}
-
-fn git_output(args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Notes the commit norn last learned at, so the hook can tell when the models are behind.
@@ -269,9 +255,10 @@ fn git_output(args: &[&str]) -> Option<String> {
 fn mark_learned(skipped: usize) {
     let Some(dir) = norn_dir() else { return };
     let marker = dir.join("learned");
+    let _ = std::fs::remove_file(dir.join("since"));
     if skipped > 0 {
         let _ = std::fs::remove_file(marker);
-    } else if let Some(head) = git_output(&["rev-parse", "HEAD"]) {
+    } else if let Some(head) = git::output(&["rev-parse", "HEAD"]) {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(marker, head + "\n");
     }
@@ -280,9 +267,26 @@ fn mark_learned(skipped: usize) {
 /// Commits on `HEAD` since norn last learned, or `None` if it never has here.
 pub fn commits_since_learned() -> Option<usize> {
     let sha = std::fs::read_to_string(norn_dir()?.join("learned")).ok()?;
-    git_output(&["rev-list", "--count", &format!("{}..HEAD", sha.trim())])?
+    git::output(&["rev-list", "--count", &format!("{}..HEAD", sha.trim())])?
         .parse()
         .ok()
+}
+
+/// Counts a commit made since the last learn and returns the count, or `None` if norn has
+/// never learned here. Counted by the hook rather than asked of git, which would cost a
+/// process on every commit; `norn config` asks git for the exact number.
+fn count_commit(dir: &Path) -> Option<usize> {
+    if !dir.join("learned").is_file() {
+        return None;
+    }
+    let since = dir.join("since");
+    let n = std::fs::read_to_string(&since)
+        .ok()
+        .and_then(|n| n.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+        + 1;
+    let _ = std::fs::write(&since, n.to_string());
+    Some(n)
 }
 
 /// Whether the hook should start a background learn: the models are behind, or have never
@@ -301,7 +305,7 @@ pub fn refresh_if_stale() {
         .and_then(|m| m.modified())
         .ok()
         .map(|t| t.elapsed().unwrap_or_default());
-    if !should_refresh(commits_since_learned(), lock_age) {
+    if !should_refresh(count_commit(&dir), lock_age) {
         return;
     }
     let (Ok(exe), Ok(())) = (std::env::current_exe(), std::fs::create_dir_all(&dir)) else {
@@ -738,6 +742,7 @@ mod tests {
         let commits: Vec<eval::Labelled> = (0..100)
             .map(|i| eval::Labelled {
                 sha: i.to_string(),
+                parent: String::new(),
                 subject: format!("fix: {i}"),
                 bot: i % 2 == 0,
             })

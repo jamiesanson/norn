@@ -1,6 +1,7 @@
 //! Collects the staged changes from git, trimmed so the request stays small and fast.
 
-use std::process::Command;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Upper bound on patch text sent to Jev. Well under the ~64k token input limit;
 /// smaller inputs are also faster.
@@ -85,8 +86,48 @@ fn exclude_pathspecs(exclude: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Starts reading the staged patch in the background, so it's ready, or nearly, by the time
+/// the classifier asks for it. The hook calls this before listing the changed files, so the
+/// two run side by side.
+pub fn prefetch_staged(exclude: &[String]) {
+    let pathspecs = exclude_pathspecs(exclude);
+    if !pathspecs.is_empty() {
+        let pathspecs = pathspecs.clone();
+        std::thread::spawn(move || git(Changes::Staged, NAME_STATUS, &pathspecs));
+    }
+    std::thread::spawn(move || git(Changes::Staged, PATCH, &pathspecs));
+}
+
+/// A staged diff that has been run, or is running, shared by everyone who asks for it.
+type Shared = Arc<OnceLock<Result<String, String>>>;
+
+/// Staged diffs are remembered for the rest of the process: what's staged can't change
+/// while a hook runs. Diffs of commits aren't, because `norn learn` reads thousands.
 fn git(changes: Changes, args: &[&str], pathspecs: &[String]) -> Result<String, String> {
-    let mut command = Command::new("git");
+    if !matches!(changes, Changes::Staged) {
+        return run_git(changes, args, pathspecs);
+    }
+    static STAGED: OnceLock<Mutex<HashMap<Vec<String>, Shared>>> = OnceLock::new();
+    let key: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string())
+        .chain(pathspecs.iter().cloned())
+        .collect();
+    let shared = STAGED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(key)
+        .or_default()
+        .clone();
+    // A second caller waits for the first to finish rather than running git again.
+    shared
+        .get_or_init(|| run_git(changes, args, pathspecs))
+        .clone()
+}
+
+fn run_git(changes: Changes, args: &[&str], pathspecs: &[String]) -> Result<String, String> {
+    let mut command = crate::git::command();
     command.args(changes.args()).args(args);
     if !pathspecs.is_empty() {
         command.arg("--").args(pathspecs);

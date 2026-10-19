@@ -162,10 +162,11 @@ fn commits_get_a_prefix_and_a_label_record() {
         "{subject}"
     );
 
-    let sha = repo.git(&["rev-parse", "HEAD"]);
+    let parent = repo.git(&["rev-parse", "HEAD~1"]);
     let labels = std::fs::read_to_string(repo.dir.join(".git/norn/labels")).unwrap();
+    let expected = format!("{}\t{subject}\t", parent.trim());
     assert!(
-        labels.starts_with(sha.trim()) && labels.trim_end().ends_with("\tmessage\tkept"),
+        labels.starts_with(&expected) && labels.trim_end().ends_with("\tmessage\tkept"),
         "{labels}"
     );
 }

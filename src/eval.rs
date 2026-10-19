@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -56,6 +55,8 @@ impl Options {
 
 pub struct Labelled {
     pub sha: String,
+    /// The first parent, which with the subject identifies a commit `norn labels` recorded.
+    pub parent: String,
     pub subject: String,
     /// Made by a bot (dependabot, renovate, ...), so never through norn's hook.
     pub bot: bool,
@@ -208,7 +209,7 @@ pub fn labelled_commits(
     limit: usize,
     types: &[String],
 ) -> Result<(Vec<Labelled>, usize), String> {
-    let output = Command::new("git")
+    let output = crate::git::command()
         .args([
             "log",
             "--no-merges",
@@ -248,6 +249,7 @@ pub fn labelled_commits(
         }
         commits.push(Labelled {
             sha: sha.to_string(),
+            parent: parents.split(' ').next().unwrap_or_default().to_string(),
             subject: subject.to_string(),
             bot: is_bot(name, email),
         });
@@ -476,6 +478,7 @@ mod tests {
     fn training_row_keeps_the_request_and_adds_the_label() {
         let commit = Labelled {
             sha: "abc1234".into(),
+            parent: "def5678".into(),
             subject: "fix(config)!: handle empty files".into(),
             bot: false,
         };

@@ -1,19 +1,19 @@
 //! Which commits norn labelled, and whether you kept its label, so `norn learn` doesn't
 //! learn its own guesses back as if you'd written them.
 //!
-//! `prepare-commit-msg` saves its suggestion to `.git/norn/pending`. Once the commit exists,
-//! `post-commit` compares it with what was committed and appends a line to
+//! `prepare-commit-msg` saves its suggestion to `.git/norn/pending`. `commit-msg`, which
+//! sees the message you actually committed, compares the two and appends a line to
 //! `.git/norn/labels`:
 //!
-//!     <sha>  <suggested prefix>  <confidence>  <editor|message>  <kept|changed>
+//!     <parent>  <subject>  <suggested prefix>  <confidence>  <editor|message>  <kept|changed>
 //!
-//! Only commits made here are recorded, and rebased commits lose their record; both then
-//! count as your own labels.
+//! The commit doesn't exist yet at that point, so it's identified by its parent and
+//! subject, which `norn learn` can match. Only commits made here are recorded, and
+//! rebased commits lose their record; both then count as your own labels.
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
 use crate::learn;
 use crate::message;
@@ -50,33 +50,37 @@ impl Flow {
     }
 }
 
+/// How `norn learn` finds a recorded commit: its first parent and its subject.
+pub type Key = (String, String);
+
 fn path(name: &str) -> Option<PathBuf> {
     Some(learn::model_path()?.with_file_name(name))
 }
 
-/// Forgets any suggestion a commit that never happened left behind, so it can't be matched
-/// to the next one.
+/// Forgets a saved suggestion, so a commit that never happened can't be matched to the
+/// next one.
 pub fn clear_pending() {
     if let Some(p) = path("pending") {
         let _ = std::fs::remove_file(p);
     }
 }
 
-pub fn save_pending(kind: &str, scope: Option<&str>, confidence: f64, flow: Flow) {
+/// `parent` is `HEAD` before the commit, or empty for a repository's first commit.
+pub fn save_pending(kind: &str, scope: Option<&str>, confidence: f64, flow: Flow, parent: &str) {
     let Some(p) = path("pending") else { return };
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let line = format!(
-        "{kind}\t{}\t{confidence:.2}\t{}\n",
+        "{kind}\t{}\t{confidence:.2}\t{}\t{parent}\n",
         scope.unwrap_or_default(),
         flow.name()
     );
     let _ = std::fs::write(p, line);
 }
 
-/// For `post-commit`: records the pending suggestion against the commit just made.
-pub fn record() {
+/// For `commit-msg`: records the saved suggestion against the message being committed.
+pub fn record(content: &str) {
     let Some(pending) = path("pending") else {
         return;
     };
@@ -84,7 +88,9 @@ pub fn record() {
         return;
     };
     let _ = std::fs::remove_file(&pending);
-    let Some(line) = describe(saved.trim_end(), &head()) else {
+    let body = message::body(content);
+    let subject = body.lines().next().unwrap_or_default();
+    let Some(line) = describe(saved.trim_end_matches('\n'), subject) else {
         return;
     };
     let Some(labels) = path("labels") else { return };
@@ -97,30 +103,19 @@ pub fn record() {
     }
 }
 
-/// `HEAD`'s sha and subject.
-fn head() -> Option<(String, String)> {
-    let output = Command::new("git")
-        .args(["log", "-1", "--format=%H%x00%s"])
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let (sha, subject) = text.trim_end().split_once('\0')?;
-    Some((sha.to_string(), subject.to_string()))
-}
-
-/// The labels line for a saved suggestion and the commit it became.
-fn describe(saved: &str, head: &Option<(String, String)>) -> Option<String> {
-    let (sha, subject) = head.as_ref()?;
+/// The labels line for a saved suggestion and the subject it became.
+fn describe(saved: &str, subject: &str) -> Option<String> {
     let mut fields = saved.split('\t');
-    let (kind, scope, confidence, flow) = (
+    let (kind, scope, confidence, flow, parent) = (
+        fields.next()?,
         fields.next()?,
         fields.next()?,
         fields.next()?,
         fields.next()?,
     );
     let scope = (!scope.is_empty()).then_some(scope);
-    let committed = message::parse_prefix(subject);
+    let subject = subject.trim_end().replace('\t', " ");
+    let committed = message::parse_prefix(&subject);
     let kept = committed.is_some_and(|p| p.kind == kind && p.scope == scope);
     let suggested = match scope {
         Some(s) => format!("{kind}({s})"),
@@ -128,30 +123,30 @@ fn describe(saved: &str, head: &Option<(String, String)>) -> Option<String> {
     };
     let outcome = if kept { "kept" } else { "changed" };
     Some(format!(
-        "{sha}\t{suggested}\t{confidence}\t{flow}\t{outcome}"
+        "{parent}\t{subject}\t{suggested}\t{confidence}\t{flow}\t{outcome}"
     ))
 }
 
-/// How much each recorded commit counts towards learning, by sha. Commits norn didn't
-/// label aren't listed, and count as 1.
-pub fn weights() -> HashMap<String, f64> {
+/// How much each recorded commit counts towards learning. Commits norn didn't label aren't
+/// listed, and count as 1.
+pub fn weights() -> HashMap<Key, f64> {
     path("labels")
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|text| parse_weights(&text))
         .unwrap_or_default()
 }
 
-fn parse_weights(text: &str) -> HashMap<String, f64> {
+fn parse_weights(text: &str) -> HashMap<Key, f64> {
     text.lines()
         .filter_map(|line| {
             let fields: Vec<&str> = line.split('\t').collect();
-            let weight = match (fields.get(3)?, fields.get(4)?) {
+            let weight = match (fields.get(4)?, fields.get(5)?) {
                 (_, &"changed") => CHANGED,
                 (&"editor", &"kept") => KEPT_IN_EDITOR,
                 (_, &"kept") => KEPT_UNSEEN,
                 _ => return None,
             };
-            Some((fields[0].to_string(), weight))
+            Some(((fields[0].to_string(), fields[1].to_string()), weight))
         })
         .collect()
 }
@@ -160,42 +155,39 @@ fn parse_weights(text: &str) -> HashMap<String, f64> {
 mod tests {
     use super::*;
 
-    fn head(subject: &str) -> Option<(String, String)> {
-        Some(("abc123".to_string(), subject.to_string()))
-    }
-
     #[test]
     fn notices_kept_and_changed_labels() {
         assert_eq!(
             describe(
-                "fix\tconfig\t0.87\teditor",
-                &head("fix(config): handle empty files")
+                "fix\tconfig\t0.87\teditor\tabc",
+                "fix(config): handle empty files"
             ),
-            Some("abc123\tfix(config)\t0.87\teditor\tkept".to_string())
+            Some("abc\tfix(config): handle empty files\tfix(config)\t0.87\teditor\tkept".into())
         );
         assert_eq!(
-            describe("fix\tconfig\t0.87\teditor", &head("refactor(config): tidy")),
-            Some("abc123\tfix(config)\t0.87\teditor\tchanged".to_string())
+            describe("fix\tconfig\t0.87\teditor\tabc", "refactor(config): tidy"),
+            Some("abc\trefactor(config): tidy\tfix(config)\t0.87\teditor\tchanged".into())
         );
         assert_eq!(
-            describe("feat\t\t0.64\tmessage", &head("feat(api): add a thing")),
-            Some("abc123\tfeat\t0.64\tmessage\tchanged".to_string()),
+            describe("feat\t\t0.64\tmessage\t", "feat(api): add a thing"),
+            Some("\tfeat(api): add a thing\tfeat\t0.64\tmessage\tchanged".into()),
             "adding a scope is a change"
         );
-        assert_eq!(describe("fix\t\t0.9\teditor", &None), None);
+        assert_eq!(describe("garbage", "fix: x"), None);
     }
 
     #[test]
     fn corrections_count_most_and_unseen_labels_least() {
         let weights = parse_weights(
-            "a\tfix\t0.87\teditor\tkept\n\
-             b\tfeat\t0.64\tmessage\tkept\n\
-             c\tfix\t0.58\teditor\tchanged\n\
+            "a\tfix: x\tfix\t0.87\teditor\tkept\n\
+             b\tfeat: y\tfeat\t0.64\tmessage\tkept\n\
+             c\trefactor: z\tfix\t0.58\teditor\tchanged\n\
              garbage\n",
         );
-        assert_eq!(weights["a"], KEPT_IN_EDITOR);
-        assert_eq!(weights["b"], KEPT_UNSEEN);
-        assert_eq!(weights["c"], CHANGED);
+        let key = |p: &str, s: &str| (p.to_string(), s.to_string());
+        assert_eq!(weights[&key("a", "fix: x")], KEPT_IN_EDITOR);
+        assert_eq!(weights[&key("b", "feat: y")], KEPT_UNSEEN);
+        assert_eq!(weights[&key("c", "refactor: z")], CHANGED);
         assert_eq!(weights.len(), 3);
     }
 

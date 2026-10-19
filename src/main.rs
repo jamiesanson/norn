@@ -26,6 +26,7 @@ mod credentials;
 mod diff;
 mod eval;
 mod features;
+mod git;
 mod jev;
 mod labels;
 mod lbfgs;
@@ -62,7 +63,6 @@ USAGE:
         --out FILE     Write to FILE instead of standard output
     norn prepare-commit-msg FILE [SOURCE] [SHA]   (git hook)
     norn commit-msg FILE                          (git hook)
-    norn post-commit                              (git hook)
 
 CONFIGURATION:
     Global:  ~/.config/norn/config.toml
@@ -80,10 +80,7 @@ CONFIGURATION:
 ";
 
 const HOOK_MARKER: &str = "# installed by norn";
-/// The hooks norn can't work without.
-const REQUIRED_HOOKS: [&str; 2] = ["prepare-commit-msg", "commit-msg"];
-/// Records which commits norn labelled. Optional: without it, they just count as yours.
-const LABELS_HOOK: &str = "post-commit";
+const HOOKS: [&str; 2] = ["prepare-commit-msg", "commit-msg"];
 const BIN_NAME: &str = if cfg!(windows) { "norn.exe" } else { "norn" };
 
 fn main() -> ExitCode {
@@ -100,21 +97,11 @@ fn main() -> ExitCode {
             }
             hook_result(result)
         }
-        ["post-commit"] => {
-            // Never says anything: the commit is done.
-            if !config::load(std::env::current_dir().ok().as_deref())
-                .disable
-                .value
-            {
-                labels::record();
-            }
-            ExitCode::SUCCESS
-        }
         ["commit-msg", file] => {
             // prepare-commit-msg already reported any config warnings for this commit.
             let config = config::load(std::env::current_dir().ok().as_deref());
             start_deadline(Path::new(file), config.deadline_ms.value);
-            hook_result(commit_msg(Path::new(file)))
+            hook_result(commit_msg(Path::new(file), &config))
         }
         ["classify", message @ ..] => command_result(run_classify(&message.join(" "))),
         ["config"] => command_result(show_config()),
@@ -178,7 +165,7 @@ fn print_warnings(config: &Config) {
 }
 
 fn repo_root() -> Option<PathBuf> {
-    let output = Command::new("git")
+    let output = crate::git::command()
         .args(["rev-parse", "--show-toplevel"])
         .stderr(Stdio::null())
         .output()
@@ -223,6 +210,10 @@ fn prepare_commit_msg(file: &Path, source: Option<&str>, config: &Config) -> Res
         return Ok(());
     }
 
+    let exclude: Vec<String> = config.exclude.iter().map(|s| s.value.clone()).collect();
+    diff::prefetch_staged(&exclude);
+    // The new commit's parent, for the label record; looked up alongside the diffs.
+    let parent = std::thread::spawn(|| git::output(&["rev-parse", "--verify", "--quiet", "HEAD"]));
     let files = diff::changed_files(diff::Changes::Staged)?;
     if files.is_empty() {
         return Ok(());
@@ -243,11 +234,13 @@ fn prepare_commit_msg(file: &Path, source: Option<&str>, config: &Config) -> Res
         file,
         &message::apply_prefix(&content, &classification.prefix()),
     )?;
+    let parent = parent.join().ok().flatten().unwrap_or_default();
     labels::save_pending(
         &classification.kind,
         classification.scope.as_deref(),
         classification.confidence,
         flow,
+        &parent,
     );
     Ok(())
 }
@@ -256,7 +249,7 @@ fn prepare_commit_msg(file: &Path, source: Option<&str>, config: &Config) -> Res
 /// another `commit.cleanup` mode or comment character, a hint would end up in the commit.
 fn git_strips_comments() -> bool {
     let get = |key: &str| {
-        Command::new("git")
+        crate::git::command()
             .args(["config", "--get", key])
             .stderr(Stdio::null())
             .output()
@@ -291,11 +284,16 @@ fn top_guesses(c: &Classification) -> String {
 }
 
 /// Clears a message that is only the prefix we suggested, so quitting the editor
-/// without writing anything still aborts the commit.
-fn commit_msg(file: &Path) -> Result<(), String> {
+/// without writing anything still aborts the commit. Otherwise, notes whether the prefix
+/// norn suggested was kept.
+fn commit_msg(file: &Path, config: &Config) -> Result<(), String> {
     let content = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
     if message::is_bare_prefix(&content) {
-        write_atomic(file, "")?;
+        labels::clear_pending();
+        return write_atomic(file, "");
+    }
+    if !config.disable.value {
+        labels::record(&content);
     }
     Ok(())
 }
@@ -672,7 +670,7 @@ fn install() -> Result<(), String> {
         Err(_) => true,
     };
     // Checked before writing anything, so a refusal leaves the repository as it was.
-    for hook in REQUIRED_HOOKS {
+    for hook in HOOKS {
         if !ours(hook) {
             return Err(format!(
                 "{} already exists and wasn't installed by norn; add `norn {hook} \"$@\"` to it instead",
@@ -680,15 +678,13 @@ fn install() -> Result<(), String> {
             ));
         }
     }
-    for hook in REQUIRED_HOOKS.into_iter().chain([LABELS_HOOK]) {
+    // Builds before 0.5 briefly installed a post-commit hook; it's no longer needed.
+    let post_commit = hooks_dir.join("post-commit");
+    if post_commit.is_file() && ours("post-commit") {
+        let _ = std::fs::remove_file(post_commit);
+    }
+    for hook in HOOKS {
         let path = hooks_dir.join(hook);
-        if hook == LABELS_HOOK && !ours(hook) {
-            out!(
-                "left {} alone; add `norn {hook}` to it so norn can tell its own labels from yours",
-                path.display()
-            );
-            continue;
-        }
         std::fs::write(&path, hook_script(hook, &exe)).map_err(|e| e.to_string())?;
         make_executable(&path)?;
         out!("installed {}", path.display());
@@ -745,7 +741,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 fn git_hooks_dir() -> Result<PathBuf, String> {
-    let output = Command::new("git")
+    let output = crate::git::command()
         .args(["rev-parse", "--git-path", "hooks"])
         .output()
         .map_err(|e| format!("failed to run git: {e}"))?;
