@@ -11,9 +11,10 @@
 //! repository's git directory and used in place of the built-in one.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::classify;
 use crate::config::Config;
@@ -42,11 +43,18 @@ const NO_SCOPE: &str = "(none)";
 /// A commit this many commits older counts half as much towards the scope model.
 const SCOPE_HALF_LIFE: f64 = 100.0;
 const SCOPE_C: f64 = 10.0;
+/// The hook re-learns in the background once this many commits have landed since the last
+/// time, so the models keep up as a project's habits drift.
+const REFRESH_AFTER: usize = 50;
+/// A background learn that hasn't finished after this long is assumed to have died.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct Options {
     pub limit: usize,
     /// Leave out the newest commits, so `norn eval` can be run on ones the model hasn't seen.
     pub skip: usize,
+    /// Started by the hook; releases the background lock when done.
+    pub background: bool,
 }
 
 impl Default for Options {
@@ -54,6 +62,7 @@ impl Default for Options {
         Options {
             limit: 1000,
             skip: 0,
+            background: false,
         }
     }
 }
@@ -72,6 +81,7 @@ impl Options {
             match arg {
                 "--limit" => options.limit = number()?,
                 "--skip" => options.skip = number()?,
+                "--background" => options.background = true,
                 _ => return Err(format!("unknown option {arg}")),
             }
         }
@@ -126,6 +136,8 @@ pub fn run(options: &Options, config: &Config) -> Result<Learned, String> {
     let (docs, scope_docs): (Vec<_>, Vec<_>) = read.into_iter().filter_map(Result::ok).unzip();
     let docs: Vec<(Tokens, String)> = docs.into_iter().flatten().collect();
     if docs.len() < MIN_COMMITS {
+        // Recorded anyway, so the hook tries again once the history has grown.
+        record_learned_at();
         let s = if docs.len() == 1 { "" } else { "s" };
         return Err(format!(
             "only {} conventional commit{s} to learn from, and norn needs {MIN_COMMITS}",
@@ -140,6 +152,7 @@ pub fn run(options: &Options, config: &Config) -> Result<Learned, String> {
         &scope_model_path(&path),
         &scope_model(&scope_docs).to_bytes(),
     )?;
+    record_learned_at();
 
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for (_, kind) in &docs {
@@ -218,6 +231,96 @@ pub fn model_path() -> Option<PathBuf> {
             .join("norn")
             .join("model.bin")
     })
+}
+
+/// norn's directory inside the repository's git directory.
+fn norn_dir() -> Option<PathBuf> {
+    model_path()?.parent().map(Path::to_path_buf)
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Notes the commit norn last learned at, so the hook can tell when the models are behind.
+fn record_learned_at() {
+    if let (Some(dir), Some(head)) = (norn_dir(), git_output(&["rev-parse", "HEAD"])) {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("learned"), head + "\n");
+    }
+}
+
+/// Commits on `HEAD` since norn last learned, or `None` if it never has here.
+pub fn commits_since_learned() -> Option<usize> {
+    let sha = std::fs::read_to_string(norn_dir()?.join("learned")).ok()?;
+    git_output(&["rev-list", "--count", &format!("{}..HEAD", sha.trim())])?
+        .parse()
+        .ok()
+}
+
+/// Whether the hook should start a background learn: the models are behind, or have never
+/// been learned, and no other learn has started in the last `LOCK_TIMEOUT`.
+fn should_refresh(commits_behind: Option<usize>, lock_age: Option<Duration>) -> bool {
+    commits_behind.is_none_or(|n| n >= REFRESH_AFTER)
+        && lock_age.is_none_or(|age| age >= LOCK_TIMEOUT)
+}
+
+/// Starts `norn learn` in the background when the learned models are out of date, without
+/// waiting for it, so the commit isn't slowed down. Its output goes to `learn.log`.
+pub fn refresh_if_stale() {
+    let Some(dir) = norn_dir() else { return };
+    let lock = dir.join("learning");
+    let lock_age = std::fs::metadata(&lock)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(|t| t.elapsed().unwrap_or_default());
+    if !should_refresh(commits_since_learned(), lock_age) {
+        return;
+    }
+    let (Ok(exe), Ok(())) = (std::env::current_exe(), std::fs::create_dir_all(&dir)) else {
+        return;
+    };
+    let Ok(log) = std::fs::File::create(dir.join("learn.log")) else {
+        return;
+    };
+    let Ok(log_err) = log.try_clone() else { return };
+    if std::fs::write(&lock, "").is_err() {
+        return;
+    }
+    let mut command = Command::new(exe);
+    command
+        .args(["learn", "--background"])
+        .stdin(Stdio::null())
+        .stdout(log)
+        .stderr(log_err);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    if command.spawn().is_err() {
+        let _ = std::fs::remove_file(&lock);
+    }
+}
+
+/// Releases the background lock when a learn the hook started finishes, however it ends.
+pub struct BackgroundLock;
+
+impl Drop for BackgroundLock {
+    fn drop(&mut self) {
+        if let Some(dir) = norn_dir() {
+            let _ = std::fs::remove_file(dir.join("learning"));
+        }
+    }
 }
 
 /// The learned scope model, beside the learned type model.
@@ -635,6 +738,22 @@ mod tests {
             template("chore: Release v1.10.0 (#7)")
         );
         assert_ne!(template("fix: a"), template("fix: b"));
+    }
+
+    #[test]
+    fn refreshes_when_behind_and_not_already_learning() {
+        let minute = Duration::from_secs(60);
+        assert!(should_refresh(None, None), "never learned");
+        assert!(should_refresh(Some(REFRESH_AFTER), None));
+        assert!(!should_refresh(Some(REFRESH_AFTER - 1), None));
+        assert!(
+            !should_refresh(Some(500), Some(minute)),
+            "a learn is running"
+        );
+        assert!(
+            should_refresh(Some(500), Some(LOCK_TIMEOUT + minute)),
+            "that learn died"
+        );
     }
 
     #[test]

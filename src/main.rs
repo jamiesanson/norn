@@ -66,11 +66,11 @@ fn main() -> ExitCode {
         ["prepare-commit-msg", file, rest @ ..] => {
             let config = hook_config();
             start_deadline(Path::new(file), config.deadline_ms.value);
-            hook_result(prepare_commit_msg(
-                Path::new(file),
-                rest.first().copied(),
-                &config,
-            ))
+            let result = prepare_commit_msg(Path::new(file), rest.first().copied(), &config);
+            if !config.disable.value {
+                learn::refresh_if_stale();
+            }
+            hook_result(result)
         }
         ["commit-msg", file] => {
             // prepare-commit-msg already reported any config warnings for this commit.
@@ -321,6 +321,7 @@ fn run_features(model: Option<&Path>) -> Result<(), String> {
 
 fn run_learn(args: &[&str]) -> Result<(), String> {
     let options = learn::Options::parse(args)?;
+    let _lock = options.background.then_some(learn::BackgroundLock);
     let config = command_config();
     let started = Instant::now();
     let learned = learn::run(&options, &config)?;
@@ -464,7 +465,16 @@ fn show_config() -> Result<(), String> {
         println!("{key:<20}{value:<30}  {source}");
     }
     match learn::model_path().filter(|p| p.is_file()) {
-        Some(path) => println!("{:<20}{:<30}  norn learn", "model", path.display()),
+        Some(path) => {
+            let age = learn::commits_since_learned()
+                .map(|n| format!(", learned {n} commits ago"))
+                .unwrap_or_default();
+            println!(
+                "{:<20}{:<30}  norn learn",
+                "model",
+                format!("{}{age}", path.display())
+            );
+        }
         None => println!(
             "{:<20}{:<30}  {}",
             "model",
@@ -581,11 +591,10 @@ fn install() -> Result<(), String> {
     }
 
     let config = command_config();
-    if config.classifier.value == config::Classifier::Local {
-        match learn::run(&learn::Options::default(), &config) {
-            Ok(learned) => print_learned(&learned),
-            Err(e) => println!("using the built-in model: {e}"),
-        }
+    // Learned scopes are used with either classifier.
+    match learn::run(&learn::Options::default(), &config) {
+        Ok(learned) => print_learned(&learned),
+        Err(e) => println!("not learning from history yet: {e}"),
     }
     Ok(())
 }
