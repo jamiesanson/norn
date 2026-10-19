@@ -42,7 +42,7 @@ CONFIGURATION:
 
     NORN_CLASSIFIER          `local` for the built-in model, or `jev` (default: local)
     TYPESAFE_API_KEY         API key for Jev; overrides the key saved by `norn jev login`
-    NORN_BASE_URL            API base URL (default: https://api.typesafe.ai)
+    NORN_BASE_URL            Jev API URL, or a Jev-compatible server (default: https://api.typesafe.ai)
     NORN_TIMEOUT_MS          Request timeout; the message is left as-is on timeout (default: 1000)
     NORN_DEADLINE_MS         Time limit for the whole hook (default: 2000)
     NORN_MIN_CONFIDENCE      Minimum confidence to apply a type (default: 0.6)
@@ -329,9 +329,11 @@ fn classify_changes(
     config: &Config,
     timeout: Option<Duration>,
 ) -> Result<Classification, String> {
-    let client = credentials::api_key().map(|key| {
+    let base_url = &config.base_url.value;
+    let api_key = credentials::api_key();
+    let client = (api_key.is_some() || !jev::requires_api_key(base_url)).then(|| {
         let timeout = timeout.unwrap_or(Duration::from_millis(config.timeout_ms.value));
-        jev::Client::new(key, &config.base_url.value, timeout)
+        jev::Client::new(api_key, base_url, timeout)
     });
     let settings = Settings {
         breaking_threshold: config.breaking_threshold.value,

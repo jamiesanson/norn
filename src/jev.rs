@@ -1,7 +1,8 @@
 //! Minimal blocking client for TypeSafe's System One API.
 //!
 //! One endpoint, one request per commit: `POST {base}/v1/systemone`.
-//! See <https://docs.typesafe.ai/api>.
+//! See <https://docs.typesafe.ai/api>. Servers that speak the same protocol, such as
+//! [Laya](https://github.com/NandhaKishorM/laya)'s `laya-serve`, work too.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -57,6 +58,10 @@ pub enum Answer {
         confidence: f64,
         #[serde(default)]
         probabilities: BTreeMap<String, f64>,
+        /// Laya's `confidence` is normalised entropy, on a different scale from Jev's. It
+        /// also sends Jev's formula under this name, so the same thresholds work on both.
+        #[serde(default)]
+        x_jev_confidence: Option<f64>,
     },
     /// Question types this tool doesn't ask, kept so parsing never fails on them.
     #[serde(other)]
@@ -80,14 +85,19 @@ impl std::fmt::Display for Error {
     }
 }
 
+/// Whether `base_url` is TypeSafe's API, which needs a key. Other servers may not.
+pub fn requires_api_key(base_url: &str) -> bool {
+    base_url.trim_end_matches('/') == DEFAULT_BASE_URL
+}
+
 pub struct Client {
     agent: ureq::Agent,
     url: String,
-    api_key: String,
+    api_key: Option<String>,
 }
 
 impl Client {
-    pub fn new(api_key: String, base_url: &str, timeout: Duration) -> Self {
+    pub fn new(api_key: Option<String>, base_url: &str, timeout: Duration) -> Self {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .http_status_as_error(false)
@@ -100,12 +110,11 @@ impl Client {
     }
 
     pub fn system_one(&self, request: &Request) -> Result<Response, Error> {
-        let mut response = self
-            .agent
-            .post(&self.url)
-            .header("Authorization", &format!("Bearer {}", self.api_key))
-            .send_json(request)
-            .map_err(Error::Http)?;
+        let mut post = self.agent.post(&self.url);
+        if let Some(key) = &self.api_key {
+            post = post.header("Authorization", &format!("Bearer {key}"));
+        }
+        let mut response = post.send_json(request).map_err(Error::Http)?;
 
         let status = response.status().as_u16();
         if status != 200 {
@@ -165,5 +174,34 @@ mod tests {
             matches!(&response.answers["department"], Answer::Choice { choice, .. } if choice == "billing")
         );
         assert!(matches!(response.answers["frustration"], Answer::Other));
+    }
+
+    #[test]
+    fn parses_laya_response() {
+        let body = r#"{
+            "model": "laya-rl-agent",
+            "answers": {
+                "queue": {"type": "choice", "choice": "billing",
+                          "probabilities": {"billing": 0.9519, "tech": 0.0327, "other": 0.0154},
+                          "confidence": 0.797, "answer_confidence": 0.9519,
+                          "action": {"act_probability": 1.0}, "x_jev_confidence": 0.9278},
+                "urgent": {"type": "noul", "noul": 0.12, "confidence": 0.6}
+            },
+            "usage": {"input_tokens": 83, "output_tokens": 0, "truncated": false},
+            "routing": {"model": "english", "reason": "English Latin text"}
+        }"#;
+        let response: Response = serde_json::from_str(body).unwrap();
+        assert!(matches!(
+            response.answers["queue"],
+            Answer::Choice { x_jev_confidence: Some(c), .. } if c == 0.9278
+        ));
+        assert!(matches!(response.answers["urgent"], Answer::Noul { noul } if noul == 0.12));
+    }
+
+    #[test]
+    fn only_typesafe_requires_a_key() {
+        assert!(requires_api_key(DEFAULT_BASE_URL));
+        assert!(requires_api_key("https://api.typesafe.ai/"));
+        assert!(!requires_api_key("http://localhost:8000"));
     }
 }

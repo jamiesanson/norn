@@ -129,6 +129,28 @@ The built-in model only chooses from the built-in types, and never marks a chang
 Run `norn config` to see the settings in effect and where each one comes from.
 `TYPESAFE_API_KEY` overrides the key saved by `norn jev login`.
 
+### Laya
+
+[Laya](https://github.com/NandhaKishorM/laya) runs Jev-style models on your own machine and
+serves the same API. Start its server, then point norn at it in your global config:
+
+```sh
+pip install "laya[serve]"
+LAYA_HOST=127.0.0.1 laya-serve
+```
+
+```toml
+# ~/.config/norn/config.toml
+classifier = "jev"
+base_url = "http://127.0.0.1:8000"
+```
+
+No API key is needed unless you set `LAYA_API_KEY`, in which case save it with
+`norn jev login`. On a slow machine, raise `timeout_ms` and `deadline_ms`.
+
+Laya's published checkpoints classify commits much less accurately than the built-in model,
+and are often confidently wrong. Run `norn eval` in your repository before relying on one.
+
 ## Classification
 
 1. **Skip** merges, squashes, amends, `fixup!`/`squash!` commits, and messages that already
