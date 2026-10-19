@@ -5,6 +5,8 @@ mod diff;
 mod eval;
 mod features;
 mod jev;
+mod lbfgs;
+mod learn;
 mod message;
 mod model;
 
@@ -28,6 +30,9 @@ USAGE:
         --limit N      Commits to evaluate (default: 50)
         --message      Send each commit's description, as `git commit -m` would
         --out FILE     Also write each result as a JSON line
+    norn learn [OPTIONS]               Fit the built-in model to this repository's history
+        --limit N      Commits to learn from (default: 1000)
+        --skip N       Leave out the newest N commits, to evaluate the model on them
     norn export [OPTIONS] [REV]        Write REV's labelled commits as training data (JSONL)
         --limit N      Commits to export (default: all)
         --message      Include each commit's description, as `git commit -m` would
@@ -77,6 +82,7 @@ fn main() -> ExitCode {
         ["config"] => command_result(show_config()),
         ["eval", rest @ ..] => command_result(run_eval(rest)),
         ["export", rest @ ..] => command_result(run_export(rest)),
+        ["learn", rest @ ..] => command_result(run_learn(rest)),
         // For `training/train_linear.py`; not in USAGE.
         ["features"] => command_result(run_features(None)),
         ["features", "--model", path] => command_result(run_features(Some(Path::new(path)))),
@@ -248,6 +254,14 @@ fn run_classify(message: &str) -> Result<(), String> {
 fn run_eval(args: &[&str]) -> Result<(), String> {
     let options = eval::Options::parse(args, 50)?;
     let config = command_config();
+    if config.classifier.value == config::Classifier::Local
+        && learn::model_path().is_some_and(|p| p.is_file())
+    {
+        eprintln!(
+            "norn: using the model learned from this repository, which has seen these commits \
+             unless it was learned with `norn learn --skip N`"
+        );
+    }
     let types: Vec<String> = config.types.value.iter().map(|t| t.name.clone()).collect();
     // Hook timeouts are tuned for commit latency; replaying history can wait longer.
     let timeout = Some(Duration::from_secs(20));
@@ -303,6 +317,30 @@ fn run_features(model: Option<&Path>) -> Result<(), String> {
         writeln!(out, "{value}").map_err(|e| e.to_string())?;
     }
     out.flush().map_err(|e| e.to_string())
+}
+
+fn run_learn(args: &[&str]) -> Result<(), String> {
+    let options = learn::Options::parse(args)?;
+    let config = command_config();
+    let started = Instant::now();
+    let learned = learn::run(&options, &config)?;
+    print_learned(&learned);
+    eprintln!("  took {}ms", started.elapsed().as_millis());
+    Ok(())
+}
+
+fn print_learned(learned: &learn::Learned) {
+    let types: Vec<String> = learned
+        .types
+        .iter()
+        .map(|(kind, n)| format!("{kind} {n}"))
+        .collect();
+    println!(
+        "learned from {} commits ({}), saved to {}",
+        learned.commits,
+        types.join(", "),
+        learned.path.display()
+    );
 }
 
 fn run_export(args: &[&str]) -> Result<(), String> {
@@ -402,6 +440,15 @@ fn show_config() -> Result<(), String> {
     ];
     for (key, value, source) in rows {
         println!("{key:<20}{value:<30}  {source}");
+    }
+    match learn::model_path().filter(|p| p.is_file()) {
+        Some(path) => println!("{:<20}{:<30}  norn learn", "model", path.display()),
+        None => println!(
+            "{:<20}{:<30}  {}",
+            "model",
+            "built-in",
+            config::Source::Default
+        ),
     }
     if config.exclude.is_empty() {
         println!("{:<20}{:<30}  {}", "exclude", "[]", config::Source::Default);
@@ -506,6 +553,14 @@ fn install() -> Result<(), String> {
         std::fs::write(&path, hook_script(hook, &exe)).map_err(|e| e.to_string())?;
         make_executable(&path)?;
         println!("installed {}", path.display());
+    }
+
+    let config = command_config();
+    if config.classifier.value == config::Classifier::Local {
+        match learn::run(&learn::Options::default(), &config) {
+            Ok(learned) => print_learned(&learned),
+            Err(e) => println!("using the built-in model: {e}"),
+        }
     }
     Ok(())
 }

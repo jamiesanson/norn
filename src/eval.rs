@@ -54,18 +54,20 @@ impl Options {
     }
 }
 
-struct Labelled {
-    sha: String,
-    subject: String,
+pub struct Labelled {
+    pub sha: String,
+    pub subject: String,
+    /// Made by a bot (dependabot, renovate, ...), so never through norn's hook.
+    pub bot: bool,
 }
 
 impl Labelled {
-    fn label(&self) -> message::Prefix<'_> {
+    pub fn label(&self) -> message::Prefix<'_> {
         message::parse_prefix(&self.subject).expect("only labelled commits are kept")
     }
 
     /// The description, as `git commit -m` would send it, or nothing for the editor flow.
-    fn message(&self, with_message: bool) -> &str {
+    pub fn message(&self, with_message: bool) -> &str {
         if with_message {
             self.label().description
         } else {
@@ -175,7 +177,7 @@ fn training_row(commit: &Labelled, request: serde_json::Value) -> serde_json::Va
 }
 
 /// Runs `f` over every commit, `WORKERS` at a time, keeping the commits' order.
-fn map_commits<T, F>(commits: &[Labelled], f: F) -> Vec<T>
+pub fn map_commits<T, F>(commits: &[Labelled], f: F) -> Vec<T>
 where
     T: Send,
     F: Fn(&Labelled) -> T + Sync,
@@ -201,13 +203,19 @@ where
 
 /// Non-merge, non-root commits in `rev` whose subject has a prefix with an allowed type,
 /// newest first, and how many had a type that isn't allowed.
-fn labelled_commits(
+pub fn labelled_commits(
     rev: &str,
     limit: usize,
     types: &[String],
 ) -> Result<(Vec<Labelled>, usize), String> {
     let output = Command::new("git")
-        .args(["log", "--no-merges", "--format=%H%x00%P%x00%s", rev, "--"])
+        .args([
+            "log",
+            "--no-merges",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%s",
+            rev,
+            "--",
+        ])
         .output()
         .map_err(|e| format!("failed to run git: {e}"))?;
     if !output.status.success() {
@@ -218,10 +226,14 @@ fn labelled_commits(
     let mut commits = Vec::new();
     let mut unknown_types = 0;
     for line in log.lines() {
-        let mut fields = line.splitn(3, '\0');
-        let (Some(sha), Some(parents), Some(subject)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
+        let mut fields = line.splitn(5, '\0');
+        let (Some(sha), Some(parents), Some(name), Some(email), Some(subject)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
             continue;
         };
         if parents.is_empty() {
@@ -237,12 +249,37 @@ fn labelled_commits(
         commits.push(Labelled {
             sha: sha.to_string(),
             subject: subject.to_string(),
+            bot: is_bot(name, email),
         });
         if commits.len() == limit {
             break;
         }
     }
     Ok((commits, unknown_types))
+}
+
+/// GitHub App bots (`dependabot[bot]`), the identity GitHub Actions commits as, and
+/// accounts named like bots (`excalibot`, `GoReleaser Bot`).
+fn is_bot(name: &str, email: &str) -> bool {
+    let (name, email) = (name.to_ascii_lowercase(), email.to_ascii_lowercase());
+    // GitHub's noreply addresses look like `12345+name@users.noreply.github.com`.
+    let local = email.split('@').next().unwrap_or_default();
+    let local = local.rsplit('+').next().unwrap_or(local);
+    let named_bot = |s: &str| {
+        s.ends_with("bot") && !["talbot", "abbot", "cabot"].iter().any(|n| s.ends_with(n))
+    };
+    [
+        "[bot]",
+        "dependabot",
+        "renovate",
+        "github-actions",
+        "release-please",
+    ]
+    .iter()
+    .any(|b| name.contains(b) || email.contains(b))
+        || email == "actions@github.com"
+        || named_bot(&name)
+        || named_bot(local)
 }
 
 fn row(commit: &Labelled, result: &Result<Classification, String>) -> String {
@@ -408,10 +445,40 @@ mod tests {
     }
 
     #[test]
+    fn recognises_bots() {
+        for (name, email) in [
+            (
+                "dependabot[bot]",
+                "49699333+dependabot[bot]@users.noreply.github.com",
+            ),
+            ("renovate-bot", "bot@renovateapp.com"),
+            ("actions-user", "actions@github.com"),
+            (
+                "GoReleaser Bot",
+                "29843943+goreleaserbot@users.noreply.github.com",
+            ),
+            (
+                "Excalidraw Bot",
+                "77840495+excalibot@users.noreply.github.com",
+            ),
+        ] {
+            assert!(is_bot(name, email), "{name}");
+        }
+        for (name, email) in [
+            ("Carlos Becker", "caarlos0@users.noreply.github.com"),
+            ("John Talbot", "jtalbot@example.com"),
+            ("Copilot", "198982749+Copilot@users.noreply.github.com"),
+        ] {
+            assert!(!is_bot(name, email), "{name}");
+        }
+    }
+
+    #[test]
     fn training_row_keeps_the_request_and_adds_the_label() {
         let commit = Labelled {
             sha: "abc1234".into(),
             subject: "fix(config)!: handle empty files".into(),
+            bot: false,
         };
         let request = serde_json::json!({
             "model": "jev-latest",

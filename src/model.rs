@@ -26,23 +26,78 @@ pub fn shared() -> Result<&'static Model, String> {
     SHARED.as_ref().map_err(|e| format!("built-in model: {e}"))
 }
 
+#[derive(Clone)]
 pub struct Model {
     pub classes: Vec<String>,
-    blocks: Vec<Block>,
-    idf: Vec<f32>,
+    pub(crate) blocks: Vec<Block>,
+    /// Inverse document frequency of each feature.
+    pub(crate) idf: Vec<f32>,
     /// `weights[feature * classes + class]`.
-    weights: Vec<f32>,
-    intercepts: Vec<f32>,
+    pub(crate) weights: Vec<f32>,
+    pub(crate) intercepts: Vec<f32>,
 }
 
-struct Block {
-    name: String,
-    weight: f32,
-    /// Term to feature number.
-    terms: HashMap<String, usize>,
+#[derive(Clone)]
+pub(crate) struct Block {
+    pub name: String,
+    pub weight: f32,
+    /// The block's terms in feature order, numbered from `first`.
+    pub terms: Vec<String>,
+    pub first: usize,
+    index: HashMap<String, usize>,
+}
+
+impl Block {
+    pub fn feature(&self, term: &str) -> Option<usize> {
+        self.index.get(term).copied()
+    }
 }
 
 impl Model {
+    /// `blocks` are each block's name, weight and terms; features are numbered through
+    /// them in order.
+    pub(crate) fn new(
+        classes: Vec<String>,
+        blocks: Vec<(String, f32, Vec<String>)>,
+        idf: Vec<f32>,
+        weights: Vec<f32>,
+        intercepts: Vec<f32>,
+    ) -> Result<Model, String> {
+        let mut first = 0;
+        let blocks: Vec<Block> = blocks
+            .into_iter()
+            .map(|(name, weight, terms)| {
+                let index = terms
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| (t.clone(), first + i))
+                    .collect();
+                let block = Block {
+                    name,
+                    weight,
+                    first,
+                    terms,
+                    index,
+                };
+                first += block.terms.len();
+                block
+            })
+            .collect();
+        if idf.len() != first
+            || weights.len() != first * classes.len()
+            || intercepts.len() != classes.len()
+        {
+            return Err("model sizes don't match".into());
+        }
+        Ok(Model {
+            classes,
+            blocks,
+            idf,
+            weights,
+            intercepts,
+        })
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Model, String> {
         let mut r = Reader { bytes, at: 0 };
         if r.take(4)? != MAGIC {
@@ -61,18 +116,11 @@ impl Model {
             let name = r.str()?;
             let weight = r.f32()?;
             let n = r.u32()? as usize;
-            let mut terms = HashMap::with_capacity(n);
-            for _ in 0..n {
-                terms.insert(r.str()?, idf.len() + terms.len());
-            }
+            let terms = (0..n).map(|_| r.str()).collect::<Result<Vec<_>, _>>()?;
             for _ in 0..n {
                 idf.push(r.f32()?);
             }
-            blocks.push(Block {
-                name,
-                weight,
-                terms,
-            });
+            blocks.push((name, weight, terms));
         }
         let weights = (0..idf.len() * classes.len())
             .map(|_| r.f32())
@@ -83,23 +131,46 @@ impl Model {
         if r.at != bytes.len() {
             return Err("model file has trailing data".into());
         }
-        Ok(Model {
-            classes,
-            blocks,
-            idf,
-            weights,
-            intercepts,
-        })
+        Model::new(classes, blocks, idf, weights, intercepts)
     }
 
-    /// The probability of each class, in `classes` order.
-    pub fn predict(&self, tokens: &Tokens) -> Vec<f64> {
-        let k = self.classes.len();
-        let mut scores: Vec<f64> = self.intercepts.iter().map(|&b| b as f64).collect();
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = MAGIC.to_vec();
+        let s = |out: &mut Vec<u8>, s: &str| {
+            out.extend((s.len() as u16).to_le_bytes());
+            out.extend(s.as_bytes());
+        };
+        out.extend(VERSION.to_le_bytes());
+        out.extend((self.classes.len() as u32).to_le_bytes());
+        for c in &self.classes {
+            s(&mut out, c);
+        }
+        out.extend((self.blocks.len() as u32).to_le_bytes());
+        for block in &self.blocks {
+            s(&mut out, &block.name);
+            out.extend(block.weight.to_le_bytes());
+            out.extend((block.terms.len() as u32).to_le_bytes());
+            for term in &block.terms {
+                s(&mut out, term);
+            }
+            for f in block.first..block.first + block.terms.len() {
+                out.extend(self.idf[f].to_le_bytes());
+            }
+        }
+        for v in self.weights.iter().chain(&self.intercepts) {
+            out.extend(v.to_le_bytes());
+        }
+        out
+    }
+
+    /// The input to the linear layer: each block's TF-IDF vector, L2-normalised and scaled
+    /// by the block's weight, as (feature, value) pairs.
+    pub(crate) fn vectorize(&self, tokens: &Tokens) -> Vec<(usize, f64)> {
+        let mut x = Vec::new();
         for block in &self.blocks {
             let mut counts: HashMap<usize, u32> = HashMap::new();
             for token in tokens.block(&block.name) {
-                if let Some(&f) = block.terms.get(token) {
+                if let Some(f) = block.feature(token) {
                     *counts.entry(f).or_default() += 1;
                 }
             }
@@ -108,22 +179,29 @@ impl Model {
                 .map(|(f, n)| (f, (1.0 + (n as f64).ln()) * self.idf[f] as f64))
                 .collect();
             let norm = values.iter().map(|(_, v)| v * v).sum::<f64>().sqrt();
-            if norm == 0.0 {
-                continue;
+            if norm > 0.0 {
+                let scale = block.weight as f64 / norm;
+                x.extend(values.into_iter().map(|(f, v)| (f, v * scale)));
             }
-            let scale = block.weight as f64 / norm;
-            for (f, v) in values {
-                let w = &self.weights[f * k..(f + 1) * k];
-                for (score, &w) in scores.iter_mut().zip(w) {
-                    *score += v * scale * w as f64;
-                }
+        }
+        x
+    }
+
+    /// The probability of each class, in `classes` order.
+    pub fn predict(&self, tokens: &Tokens) -> Vec<f64> {
+        let k = self.classes.len();
+        let mut scores: Vec<f64> = self.intercepts.iter().map(|&b| b as f64).collect();
+        for (f, v) in self.vectorize(tokens) {
+            let w = &self.weights[f * k..(f + 1) * k];
+            for (score, &w) in scores.iter_mut().zip(w) {
+                *score += v * w as f64;
             }
         }
         softmax(&scores)
     }
 }
 
-fn softmax(scores: &[f64]) -> Vec<f64> {
+pub(crate) fn softmax(scores: &[f64]) -> Vec<f64> {
     let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let exp: Vec<f64> = scores.iter().map(|s| (s - max).exp()).collect();
     let total: f64 = exp.iter().sum();
@@ -255,6 +333,12 @@ mod tests {
         for (name, _) in crate::config::BUILT_IN_TYPES {
             assert!(model.classes.iter().any(|c| c == name), "{name}");
         }
+    }
+
+    #[test]
+    fn writes_what_it_reads() {
+        let bytes = shared().unwrap().to_bytes();
+        assert_eq!(bytes, include_bytes!("../models/shared.bin"));
     }
 
     #[test]

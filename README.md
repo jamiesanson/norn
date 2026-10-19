@@ -124,7 +124,10 @@ the same path.
 `base_url` can't be set in `.norn.toml`, so a repository you clone can't send your diffs
 and API key somewhere else. Nor can `classifier`.
 
-The built-in model only chooses from the built-in types, and never marks a change breaking.
+`norn install` also fits the built-in model to the repository's history, if it has at least
+20 commits with conventional prefixes, so it learns how the project labels its changes,
+including its own `types`. Run `norn learn` to update it. The built-in model never marks a
+change breaking.
 
 Run `norn config` to see the settings in effect and where each one comes from.
 `TYPESAFE_API_KEY` overrides the key saved by `norn jev login`.
@@ -202,8 +205,9 @@ To measure a change to classification, run `norn eval` in a repository whose his
 already uses conventional prefixes. It replays the last 50 labelled commits (`--limit`)
 through the classifier and reports accuracy and the most common mistakes. `--message` also
 sends each commit's description, as `git commit -m` would, and `--out FILE` writes every
-answer with Jev's probabilities as JSON lines. Set `types` in that repository's
-`.norn.toml` to match its conventions first; many projects label dependency and CI
+answer with the classifier's probabilities as JSON lines. Run `norn learn --skip 50` first,
+so the model is scored on commits it hasn't learned from. With Jev, set `types` in that
+repository's `.norn.toml` to match its conventions; many projects label dependency and CI
 updates `chore`, which the default types would call `build` and `ci`.
 
 `norn export` writes the same commits as training data for a local model; see

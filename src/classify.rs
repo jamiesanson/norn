@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use crate::config::{Classifier, ScopeRule, TypeDef};
 use crate::diff::{self, ChangedFile, Changes, Outgoing};
 use crate::jev::{self, Answer, NoulCriteria, Question};
-use crate::{features, model};
+use crate::{features, learn};
 
 const TYPE_INSTRUCTIONS: &str =
     "Which Conventional Commits type best describes the primary purpose of this staged change?";
@@ -142,6 +142,26 @@ pub fn request_for<'a>(
     model_request(changes, files, exclude, message, types).map(Some)
 }
 
+/// The tokens the built-in model would see for a change, or `None` when the local rules
+/// answer without it. `norn learn` trains on these.
+pub fn model_tokens(
+    changes: Changes,
+    files: &[ChangedFile],
+    exclude: &[String],
+    message: &str,
+    types: &[TypeDef],
+) -> Result<Option<features::Tokens>, String> {
+    if local_type(files, types).is_some() {
+        return Ok(None);
+    }
+    let outgoing = outgoing_for(changes, files, exclude)?;
+    Ok(Some(features::tokens(
+        &outgoing.files,
+        &outgoing.patch,
+        message,
+    )))
+}
+
 fn model_request<'a>(
     changes: Changes,
     files: &[ChangedFile],
@@ -174,7 +194,7 @@ fn local_model(
     types: &[TypeDef],
     scope: Option<String>,
 ) -> Result<Classification, String> {
-    let model = model::shared()?;
+    let model = learn::active_model()?;
     let p = model.predict(&features::tokens(&outgoing.files, &outgoing.patch, message));
     let allowed: Vec<(&str, f64)> = model
         .classes
@@ -184,7 +204,7 @@ fn local_model(
         .map(|(class, p)| (class.as_str(), p))
         .collect();
     if allowed.is_empty() {
-        return Err("the built-in model doesn't know any of the configured types".into());
+        return Err("the local model doesn't know any of the configured types".into());
     }
     let total: f64 = allowed.iter().map(|(_, p)| p).sum();
     let probabilities: BTreeMap<String, f64> = allowed
