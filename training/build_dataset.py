@@ -1,9 +1,9 @@
 """Builds a training set for a commit-type model from public conventional-commit history.
 
 Clones each repository in `repos.txt` (shallow, no checkout), runs `norn export` over it,
-filters the rows and writes `train.jsonl` and `heldout.jsonl` in the format `laya-train`
-reads. Repositories under `[heldout]` are kept out of training entirely, so a fine-tune can
-be compared with Jev on repositories it has never seen.
+filters the rows and writes `train.jsonl` and `heldout.jsonl`, which `train_linear.py`
+reads. Repositories under `[heldout]` are kept out of training entirely, so a model can be
+compared with Jev on repositories it has never seen.
 
     python3 training/build_dataset.py --norn target/release/norn --out ~/norn-dataset
 
