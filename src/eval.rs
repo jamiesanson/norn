@@ -386,7 +386,7 @@ fn summary(commits: &[Labelled], results: &[Result<Classification, String>]) -> 
         *confusions.entry((a.0.kind, a.1.kind.as_str())).or_default() += 1;
     }
     let mut confusions: Vec<_> = confusions.into_iter().collect();
-    confusions.sort_by(|a, b| b.1.cmp(&a.1));
+    confusions.sort_by_key(|a| std::cmp::Reverse(a.1));
     if !confusions.is_empty() {
         line("mistakes    (labelled → chosen)".into());
         for ((expected, chosen), n) in confusions.iter().take(8) {
