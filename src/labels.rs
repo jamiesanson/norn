@@ -71,12 +71,22 @@ pub fn save_pending(kind: &str, scope: Option<&str>, confidence: f64, flow: Flow
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let line = format!(
-        "{kind}\t{}\t{confidence:.2}\t{}\t{parent}\n",
+    let _ = std::fs::write(p, suggestion(kind, scope, confidence, flow, parent) + "\n");
+}
+
+/// What `save_pending` saves, and `describe` reads.
+fn suggestion(
+    kind: &str,
+    scope: Option<&str>,
+    confidence: f64,
+    flow: Flow,
+    parent: &str,
+) -> String {
+    format!(
+        "{kind}\t{}\t{confidence:.2}\t{}\t{parent}",
         scope.unwrap_or_default(),
         flow.name()
-    );
-    let _ = std::fs::write(p, line);
+    )
 }
 
 /// For `commit-msg`: records the saved suggestion against the message being committed.
@@ -90,9 +100,27 @@ pub fn record(content: &str) {
     let _ = std::fs::remove_file(&pending);
     let body = message::body(content);
     let subject = body.lines().next().unwrap_or_default();
-    let Some(line) = describe(saved.trim_end_matches('\n'), subject) else {
-        return;
-    };
+    if let Some(line) = describe(saved.trim_end_matches('\n'), subject) {
+        append(&line);
+    }
+}
+
+/// For `norn reword`: records a suggestion you saw in its todo list against the subject you
+/// chose. `parent` is the reworded commit's parent.
+pub fn record_reworded(
+    kind: &str,
+    scope: Option<&str>,
+    confidence: f64,
+    parent: &str,
+    subject: &str,
+) {
+    let saved = suggestion(kind, scope, confidence, Flow::Editor, parent);
+    if let Some(line) = describe(&saved, subject) {
+        append(&line);
+    }
+}
+
+fn append(line: &str) {
     let Some(labels) = path("labels") else { return };
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
