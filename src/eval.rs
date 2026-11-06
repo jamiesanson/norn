@@ -178,10 +178,11 @@ fn training_row(commit: &Labelled, request: serde_json::Value) -> serde_json::Va
 }
 
 /// Runs `f` over every commit, `WORKERS` at a time, keeping the commits' order.
-pub fn map_commits<T, F>(commits: &[Labelled], f: F) -> Vec<T>
+pub fn map_commits<C, T, F>(commits: &[C], f: F) -> Vec<T>
 where
+    C: Sync,
     T: Send,
-    F: Fn(&Labelled) -> T + Sync,
+    F: Fn(&C) -> T + Sync,
 {
     let results: Vec<Mutex<Option<T>>> = commits.iter().map(|_| Mutex::new(None)).collect();
     let next = AtomicUsize::new(0);
