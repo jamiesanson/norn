@@ -48,7 +48,8 @@ run `norn classify "your message"`.
   to refresh it.
 - Changes that only touch docs, tests or CI config get `docs`, `test` or `ci` directly.
 - If norn isn't confident, your message is left unchanged. In the editor, it suggests its
-  two best guesses in a comment.
+  two best guesses in a comment. Run `norn reword` before pushing to prefix those commits
+  in one go.
 - Commits norn labelled count for less when it learns, unless you changed its label.
 
 ## Configuration
