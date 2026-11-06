@@ -222,7 +222,7 @@ fn prepare_commit_msg(file: &Path, source: Option<&str>, config: &Config) -> Res
     let flow = labels::Flow::from_source(source);
     let min_confidence = config.min_confidence.value;
     if classification.confidence < min_confidence {
-        let guesses = top_guesses(&classification);
+        let guesses = classification.top_guesses();
         if flow == labels::Flow::Editor && git_strips_comments() {
             let hint = format!("norn isn't sure: {guesses}?");
             return write_atomic(file, &message::add_hint(&content, &hint));
@@ -260,27 +260,6 @@ fn git_strips_comments() -> bool {
     get("commit.cleanup").is_none_or(|mode| matches!(mode.as_str(), "strip" | "default"))
         && get("core.commentChar").is_none_or(|c| c == "#")
         && get("core.commentString").is_none_or(|c| c == "#")
-}
-
-/// The two likeliest prefixes, such as `fix(config) (48%) or feat(config) (31%)`.
-fn top_guesses(c: &Classification) -> String {
-    let mut ranked: Vec<(&String, &f64)> = c.probabilities.iter().collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(a.1));
-    let scope = c
-        .scope
-        .as_ref()
-        .map(|s| format!("({s})"))
-        .unwrap_or_default();
-    let guesses: Vec<String> = ranked
-        .iter()
-        .take(2)
-        .map(|(kind, p)| format!("{kind}{scope} ({:.0}%)", **p * 100.0))
-        .collect();
-    if guesses.is_empty() {
-        format!("{}{scope}", c.kind)
-    } else {
-        guesses.join(" or ")
-    }
 }
 
 /// Clears a message that is only the prefix we suggested, so quitting the editor
