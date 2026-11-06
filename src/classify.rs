@@ -49,6 +49,27 @@ impl Classification {
         let bang = if self.breaking { "!" } else { "" };
         format!("{}{scope}{bang}: ", self.kind)
     }
+
+    /// The two likeliest prefixes, such as `fix(config) (48%) or feat(config) (31%)`.
+    pub fn top_guesses(&self) -> String {
+        let mut ranked: Vec<(&String, &f64)> = self.probabilities.iter().collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(a.1));
+        let scope = self
+            .scope
+            .as_ref()
+            .map(|s| format!("({s})"))
+            .unwrap_or_default();
+        let guesses: Vec<String> = ranked
+            .iter()
+            .take(2)
+            .map(|(kind, p)| format!("{kind}{scope} ({:.0}%)", **p * 100.0))
+            .collect();
+        if guesses.is_empty() {
+            format!("{}{scope}", self.kind)
+        } else {
+            guesses.join(" or ")
+        }
+    }
 }
 
 pub struct Settings<'a> {

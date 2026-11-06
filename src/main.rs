@@ -33,6 +33,7 @@ mod lbfgs;
 mod learn;
 mod message;
 mod model;
+mod reword;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -57,6 +58,8 @@ USAGE:
     norn learn [OPTIONS]               Fit the built-in model to this repository's history
         --limit N      Commits to learn from (default: 1000)
         --skip N       Leave out the newest N commits, to evaluate the model on them
+    norn reword [OPTIONS] [BASE]       Prefix the commits after BASE that have none (default: unpushed)
+        --dry-run      Show norn's guesses without rewriting anything
     norn export [OPTIONS] [REV]        Write REV's labelled commits as training data (JSONL)
         --limit N      Commits to export (default: all)
         --message      Include each commit's description, as `git commit -m` would
@@ -108,6 +111,10 @@ fn main() -> ExitCode {
         ["eval", rest @ ..] => command_result(run_eval(rest)),
         ["export", rest @ ..] => command_result(run_export(rest)),
         ["learn", rest @ ..] => command_result(run_learn(rest)),
+        ["reword", rest @ ..] => command_result(run_reword(rest)),
+        // Run by the rebase `norn reword` starts; not in USAGE.
+        ["__reword-todo", file] => command_result(reword::edit_rebase_todo(Path::new(file))),
+        ["__reword-amend", sha] => command_result(reword::amend(sha)),
         // For `training/train_linear.py`; not in USAGE.
         ["features"] => command_result(run_features(None)),
         ["features", "--model", path] => command_result(run_features(Some(Path::new(path)))),
@@ -222,7 +229,7 @@ fn prepare_commit_msg(file: &Path, source: Option<&str>, config: &Config) -> Res
     let flow = labels::Flow::from_source(source);
     let min_confidence = config.min_confidence.value;
     if classification.confidence < min_confidence {
-        let guesses = top_guesses(&classification);
+        let guesses = classification.top_guesses();
         if flow == labels::Flow::Editor && git_strips_comments() {
             let hint = format!("norn isn't sure: {guesses}?");
             return write_atomic(file, &message::add_hint(&content, &hint));
@@ -260,27 +267,6 @@ fn git_strips_comments() -> bool {
     get("commit.cleanup").is_none_or(|mode| matches!(mode.as_str(), "strip" | "default"))
         && get("core.commentChar").is_none_or(|c| c == "#")
         && get("core.commentString").is_none_or(|c| c == "#")
-}
-
-/// The two likeliest prefixes, such as `fix(config) (48%) or feat(config) (31%)`.
-fn top_guesses(c: &Classification) -> String {
-    let mut ranked: Vec<(&String, &f64)> = c.probabilities.iter().collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(a.1));
-    let scope = c
-        .scope
-        .as_ref()
-        .map(|s| format!("({s})"))
-        .unwrap_or_default();
-    let guesses: Vec<String> = ranked
-        .iter()
-        .take(2)
-        .map(|(kind, p)| format!("{kind}{scope} ({:.0}%)", **p * 100.0))
-        .collect();
-    if guesses.is_empty() {
-        format!("{}{scope}", c.kind)
-    } else {
-        guesses.join(" or ")
-    }
 }
 
 /// Clears a message that is only the prefix we suggested, so quitting the editor
@@ -349,6 +335,18 @@ fn run_eval(args: &[&str]) -> Result<(), String> {
     // Hook timeouts are tuned for commit latency; replaying history can wait longer.
     let timeout = Some(Duration::from_secs(20));
     eval::run(&options, &types, |sha, message| {
+        let changes = diff::Changes::Commit(sha);
+        let files = diff::changed_files(changes)?;
+        classify_changes(changes, &files, message, &config, timeout)
+    })
+}
+
+fn run_reword(args: &[&str]) -> Result<(), String> {
+    let options = reword::Options::parse(args)?;
+    let config = command_config();
+    // Hook timeouts are tuned for commit latency; this can wait longer.
+    let timeout = Some(Duration::from_secs(20));
+    reword::run(&options, |sha, message| {
         let changes = diff::Changes::Commit(sha);
         let files = diff::changed_files(changes)?;
         classify_changes(changes, &files, message, &config, timeout)
